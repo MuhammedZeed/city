@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "experimentalDecorators": true,
+    "useDefineForClassFields": false,
+    "module": "ESNext",
+    "types": ["vite/client"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "allowJs": true,
+    "jsx": "react-jsx",
+    "paths": {
+      "@enginora/shared": ["../../packages/shared/src/index.ts"],
+      "@enginora/shared/*": ["../../packages/shared/src/*"],
+      "react": ["./node_modules/@types/react/index.d.ts", "../../node_modules/@types/react/index.d.ts"],
+      "react/jsx-runtime": ["./node_modules/@types/react/jsx-runtime.d.ts", "../../node_modules/@types/react/jsx-runtime.d.ts"],
+      "react/jsx-dev-runtime": ["./node_modules/@types/react/jsx-dev-runtime.d.ts", "../../node_modules/@types/react/jsx-dev-runtime.d.ts"],
+      "lucide-react": ["./node_modules/lucide-react/dist/lucide-react.d.ts", "../../node_modules/lucide-react/dist/lucide-react.d.ts"],
+      "@/*": ["./*"]
+    },
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  },
+  "include": ["src", "../../packages/shared/src"],
+  "exclude": ["dist"]
+}
