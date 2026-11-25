@@ -1,0 +1,8 @@
+{
+  "name": "EMPIRE",
+  "description": "لعبة استراتيجية اقتصادية وعسكرية حديثة لبناء المدن وإدارة الموارد والتوسع العالمي.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
