@@ -1,0 +1,51 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "enginora-city-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-10-01",
+  "workers_dev": true,
+
+  // Default configuration (supports local `wrangler dev` and default `wrangler deploy`)
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "enginora-city-db",
+      "database_id": "452ebddc-50cc-4336-9310-746b1181a256"
+    }
+  ],
+  "vars": {
+    "ENVIRONMENT": "development",
+    "ALLOWED_ORIGINS": "https://enginora-city-game.pages.dev,https://enginora-city-admin.pages.dev,http://localhost:3000,http://localhost:3001,http://localhost:3002,http://127.0.0.1:3000,http://127.0.0.1:3001,http://127.0.0.1:3002"
+  },
+
+  "env": {
+    "preview": {
+      "name": "enginora-city-api-preview",
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "enginora-city-db",
+          "database_id": "452ebddc-50cc-4336-9310-746b1181a256"
+        }
+      ],
+      "vars": {
+        "ENVIRONMENT": "preview",
+        "ALLOWED_ORIGINS": "https://enginora-city-game.pages.dev,https://enginora-city-admin.pages.dev"
+      }
+    },
+    "production": {
+      "name": "enginora-city-api",
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "enginora-city-db",
+          "database_id": "452ebddc-50cc-4336-9310-746b1181a256"
+        }
+      ],
+      "vars": {
+        "ENVIRONMENT": "production",
+        "ALLOWED_ORIGINS": "https://enginora-city-game.pages.dev,https://enginora-city-admin.pages.dev"
+      }
+    }
+  }
+}
