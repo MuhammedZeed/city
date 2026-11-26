@@ -38,6 +38,9 @@ export interface Env extends EmailEnv {
 
 const API_VERSION = 2;
 const PROJECT_NAME = 'ENGINORA CITY';
+function emailVerificationEnabled(env: Env): boolean {
+  return Boolean(env.RESEND_API_KEY?.trim() && env.EMAIL_FROM?.trim());
+}
 
 function parseAllowedOrigins(raw?: string): Set<string> {
   const origins = new Set<string>();
@@ -375,7 +378,7 @@ export default {
         }
 
         // Player registered with email -> MUST verify email before receiving a game session
-        if (email) {
+        if (email && emailVerificationEnabled(env)) {
           const otpResult = await issueEmailCode(env.DB, {
             accountId: created.player.account_id,
             email,
@@ -460,7 +463,7 @@ export default {
             expiresAt: session.expiresAt,
             accountId: created.player.account_id,
             email: null,
-            phone: created.player.phone,
+            email: created.player.email,
             emailVerified: false,
             requiresEmailVerification: false,
             state: created.state,
@@ -684,7 +687,7 @@ export default {
           );
         }
 
-        if (player.email && player.email_verified !== 1) {
+         if (emailVerificationEnabled(env) && player.email && player.email_verified !== 1) {
           return jsonResponse(
             {
               ok: false,
@@ -1018,7 +1021,7 @@ export default {
             corsHeaders
           );
         }
-        if (session.player.email && session.player.email_verified !== 1) {
+                if (emailVerificationEnabled(env) && session.player.email && session.player.email_verified !== 1) {
           return jsonResponse(
             {
               ok: false,
