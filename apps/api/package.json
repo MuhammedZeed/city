@@ -7,11 +7,13 @@
     "dev": "wrangler dev --var \"ALLOWED_ORIGINS:https://enginora-city-game.pages.dev,https://enginora-city-admin.pages.dev,http://localhost:3000,http://localhost:3001,http://localhost:3002,http://127.0.0.1:3000,http://127.0.0.1:3001,http://127.0.0.1:3002\" --var \"ENVIRONMENT:development\"",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "db:init:local": "wrangler d1 execute DB --local --file=migrations/0001_init.sql",
+    "db:init:remote": "wrangler d1 execute enginora-city-db --remote --file=migrations/0001_init.sql"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20251014.0",
     "typescript": "^7.0.2",
     "wrangler": "^4.42.0"
   }
-} 
+}
