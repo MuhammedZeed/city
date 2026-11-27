@@ -81,6 +81,7 @@ import {
 } from '@enginora/shared';
 import { soundFx } from './engine/soundFx';
 import {
+  apiGetConfig,
   apiGetState,
   apiLogin,
   apiLogout,
@@ -201,6 +202,39 @@ export default function App() {
     }, 20000);
     return () => window.clearInterval(id);
   }, [apiToken, sessionAuthenticated, pushToast]);
+
+  // Before login: always show the real server status (open/closed) from the API
+  useEffect(() => {
+    if (sessionAuthenticated) return;
+    let cancelled = false;
+    const loadConfig = async () => {
+      const r = await apiGetConfig();
+      if (cancelled || !r.ok || !Array.isArray(r.data.servers) || r.data.servers.length === 0) {
+        return;
+      }
+      const remote = r.data.servers as GameState['adminConfig']['servers'];
+      setState((prev) => {
+        const merged = remote.map((srv) => ({
+          ...(prev.adminConfig.servers.find((x) => x.id === srv.id) ?? {}),
+          ...srv,
+        }));
+        const keepId = merged.some((x) => x.id === prev.selectedServerId)
+          ? prev.selectedServerId
+          : merged[0].id;
+        return {
+          ...prev,
+          selectedServerId: keepId,
+          adminConfig: { ...prev.adminConfig, servers: merged },
+        };
+      });
+    };
+    void loadConfig();
+    const id = window.setInterval(loadConfig, 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [sessionAuthenticated]);
 
   // Autosave to the server every 60 seconds while playing, and when the tab is hidden
   useEffect(() => {
