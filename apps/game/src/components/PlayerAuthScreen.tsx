@@ -28,11 +28,14 @@ import {
 } from '@enginora/shared';
 import { GameState, PaymentMethodId } from '@enginora/shared';
 import { LegalPoliciesModal } from './LegalPoliciesModal';
+import { compressReceiptFile } from '../api/client';
 
 interface PlayerAuthScreenProps {
   state: GameState;
-  onSubmitRegistration: (payload: RegistrationSubmitPayload) => { error?: string };
-  onLoginApproved: (identifier: string) => { error?: string };
+  onSubmitRegistration: (
+    payload: RegistrationSubmitPayload & { password: string }
+  ) => Promise<{ error?: string }>;
+  onLoginApproved: (identifier: string, password: string) => Promise<{ error?: string }>;
   onSelectServer: (serverId: string) => void;
 }
 
@@ -85,6 +88,9 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
   const feeSar = regDiscount.finalSar;
 
   const [loginIdentifier, setLoginIdentifier] = useState(reg.email || reg.nickname || '');
+  const [password, setPassword] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [previewLightbox, setPreviewLightbox] = useState<string | null>(null);
   const [allowResubmit, setAllowResubmit] = useState(false);
@@ -95,25 +101,18 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
   const handleReceiptChange = (fileList: FileList | null) => {
     const file = fileList?.[0];
     if (!file) return;
-    const allowed = ['image/png', 'image/jpeg', 'image/webp'];
-    if (!allowed.includes(file.type)) {
-      setFormError('صيغة الفاتورة غير مدعومة — يُسمح فقط بصور PNG أو JPG أو WEBP.');
-      return;
-    }
-    if (file.size > 2 * 1024 * 1024) {
-      setFormError('حجم صورة الفاتورة يتجاوز الحد الأقصى المسموح (2MB).');
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      setFormError(null);
-      setReceiptName(file.name);
-      setReceiptPreviewUrl(String(reader.result ?? ''));
-    };
-    reader.readAsDataURL(file);
+    compressReceiptFile(file)
+      .then((out) => {
+        setFormError(null);
+        setReceiptName(file.name);
+        setReceiptPreviewUrl(out);
+      })
+      .catch((err: unknown) => {
+        setFormError(err instanceof Error ? err.message : 'تعذر معالجة صورة الفاتورة.');
+      });
   };
 
-  const handleSubmitReg = (e: React.FormEvent) => {
+  const handleSubmitReg = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
     if (!receiptPreviewUrl) {
@@ -126,7 +125,13 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
       );
       return;
     }
-    const res = onSubmitRegistration({
+    if (password.length < 8) {
+      setFormError('كلمة المرور يجب أن تكون 8 أحرف أو أرقام على الأقل.');
+      return;
+    }
+    setBusy(true);
+    const res = await onSubmitRegistration({
+      password,
       nickname,
       fullName,
       nationalId,
@@ -139,19 +144,25 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
       receiptPreviewUrl,
       acceptedPolicies,
     });
+    setBusy(false);
     if (res.error) {
       setFormError(res.error);
     } else {
+      setPassword('');
       setAllowResubmit(false);
     }
   };
 
-  const handleSubmitLogin = (e: React.FormEvent) => {
+  const handleSubmitLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
-    const res = onLoginApproved(loginIdentifier);
+    setBusy(true);
+    const res = await onLoginApproved(loginIdentifier, loginPassword);
+    setBusy(false);
     if (res.error) {
       setFormError(res.error);
+    } else {
+      setLoginPassword('');
     }
   };
 
@@ -547,6 +558,25 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
                         </div>
                       </div>
 
+                      <div>
+                        <label className="block text-slate-300 font-semibold mb-1">
+                          كلمة المرور * <span className="text-slate-400 font-normal">(8 أحرف أو أرقام على الأقل)</span>
+                        </label>
+                        <div className="relative">
+                          <Lock className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="password"
+                            required
+                            minLength={8}
+                            autoComplete="new-password"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            placeholder="كلمة مرور لدخول حسابك لاحقًا"
+                            className="w-full min-h-[44px] pr-9 pl-3 py-2 rounded-xl bg-slate-950/90 border border-slate-700 font-num text-slate-100 focus:outline-none focus:border-amber-400"
+                          />
+                        </div>
+                      </div>
+
                       {/* Payment Method Selection with Per-Method Discounts */}
                       <div className="space-y-2">
                         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -698,9 +728,10 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
 
                       <button
                         type="submit"
-                        className="w-full min-h-[46px] px-5 py-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm shadow-lg transition-colors"
+                        disabled={busy}
+                        className="w-full min-h-[46px] px-5 py-3 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 font-bold text-sm shadow-lg transition-colors"
                       >
-                        إرسال طلب التسجيل وفاتورة الـ {feeSar} ريال للمراجعة
+                        {busy ? 'جارٍ إرسال الطلب...' : `إرسال طلب التسجيل وفاتورة الـ ${feeSar} ريال للمراجعة`}
                       </button>
                     </form>
                   ) : (
@@ -715,6 +746,21 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
                           value={loginIdentifier}
                           onChange={(e) => setLoginIdentifier(e.target.value)}
                           placeholder="أدخل البريد الإلكتروني أو رقم الجوال أو معرّف الحساب"
+                          className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl bg-slate-950/90 border border-slate-700 text-slate-100 focus:outline-none focus:border-amber-400"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-slate-300 font-semibold mb-1.5">
+                          كلمة المرور
+                        </label>
+                        <input
+                          type="password"
+                          required
+                          autoComplete="current-password"
+                          value={loginPassword}
+                          onChange={(e) => setLoginPassword(e.target.value)}
+                          placeholder="كلمة المرور"
                           className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl bg-slate-950/90 border border-slate-700 text-slate-100 focus:outline-none focus:border-amber-400"
                         />
                       </div>
@@ -735,14 +781,14 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
 
                       <button
                         type="submit"
-                        disabled={!isServerOpen}
+                        disabled={busy}
                         className={`w-full min-h-[46px] px-5 py-3 rounded-xl font-bold text-sm shadow-lg transition-colors ${
-                          isServerOpen
+                          !busy
                             ? 'bg-[#1D4ED8] hover:bg-blue-600 text-white'
                             : 'bg-slate-800 text-slate-400 border border-slate-700 cursor-not-allowed'
                         }`}
                       >
-                        {isServerOpen ? 'دخول إلى عاصمة القيادة' : 'السيرفر مغلق حاليًا'}
+                        {busy ? 'جارٍ الدخول...' : 'دخول إلى عاصمة القيادة'}
                       </button>
                     </form>
                   )}
