@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { compressReceiptFile } from '../api/client';
 import {
   CalendarCheck2,
   CheckCircle2,
@@ -120,20 +121,14 @@ export const StoreView: React.FC<StoreViewProps> = ({
     setReceiptError(null);
     const file = e.target.files?.[0];
     if (!file) return;
-    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
-      setReceiptError('يُسمح فقط بصور إيصال PNG أو JPG أو WEBP.');
-      return;
-    }
-    if (file.size > 2 * 1024 * 1024) {
-      setReceiptError('حجم صورة الإيصال يجب ألا يتجاوز 2MB.');
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      setReceiptName(file.name);
-      setReceiptPreviewUrl(String(reader.result ?? ''));
-    };
-    reader.readAsDataURL(file);
+    compressReceiptFile(file)
+      .then((out) => {
+        setReceiptName(file.name);
+        setReceiptPreviewUrl(out);
+      })
+      .catch((err: unknown) => {
+        setReceiptError(err instanceof Error ? err.message : 'تعذر معالجة صورة الإيصال.');
+      });
   };
 
   const submitCheckout = (e: React.FormEvent) => {
