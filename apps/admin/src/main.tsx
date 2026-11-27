@@ -1,5 +1,5 @@
 import {createRoot} from 'react-dom/client';
-import ApprovalsApp from './ApprovalsApp.tsx';
+import App from './App.tsx';
 import './index.css';
 
-createRoot(document.getElementById('root')!).render(<ApprovalsApp />);
+createRoot(document.getElementById('root')!).render(<App />);

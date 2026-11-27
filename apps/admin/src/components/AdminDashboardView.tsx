@@ -8,12 +8,15 @@ import {
   CreditCard,
   Download,
   Eye,
+  EyeOff,
   FileText,
   Gamepad2,
   Gem,
   HardDriveDownload,
+  KeyRound,
   LifeBuoy,
   Lock,
+  LogOut,
   Percent,
   Plus,
   Power,
@@ -29,7 +32,9 @@ import {
   TrendingUp,
   Upload,
   UserCheck,
+  Users,
   Wallet,
+  X,
 } from "lucide-react";
 import {
   MARKET_RESOURCES_META,
@@ -38,6 +43,7 @@ import {
   SHIELD_PACKAGES,
   SPEEDUP_CARDS_META,
   TICKET_STATUS_LABELS,
+  fetchReceiptBlobUrl,
   formatDecimal,
   formatKsaDateTime,
   formatNumber,
@@ -45,10 +51,10 @@ import {
   getTotalGems,
   AdminBackupSnapshot,
   AdminConfig,
+  AdminPlayerRecord,
   AdminRole,
   FinancialCategory,
   GameServerConfig,
-  GameState,
   MarketResourceId,
   PaymentMethodId,
   SpeedUpTierId,
@@ -57,6 +63,89 @@ import {
 } from "@enginora/shared";
 
 const FounderVaultSection = React.lazy(() => import("./FounderVaultSection"));
+
+const ReceiptPreviewControl: React.FC<{
+  receiptId?: string;
+  legacyPreviewUrl?: string;
+  label: string;
+  adminToken?: string;
+  onOpenLightbox: (url: string) => void;
+}> = ({ receiptId, legacyPreviewUrl, label, adminToken, onOpenLightbox }) => {
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (legacyPreviewUrl || !receiptId || !adminToken) {
+      setBlobUrl(null);
+      setFailed(false);
+      return;
+    }
+    let cancelled = false;
+    let createdUrl: string | null = null;
+    setFailed(false);
+    void (async () => {
+      const url = await fetchReceiptBlobUrl(adminToken, receiptId);
+      if (cancelled) {
+        if (url) URL.revokeObjectURL(url);
+        return;
+      }
+      if (!url) {
+        setFailed(true);
+        return;
+      }
+      createdUrl = url;
+      setBlobUrl(url);
+    })();
+    return () => {
+      cancelled = true;
+      if (createdUrl) URL.revokeObjectURL(createdUrl);
+    };
+  }, [receiptId, legacyPreviewUrl, adminToken]);
+
+  const effectiveUrl = legacyPreviewUrl || blobUrl;
+  if (!receiptId && !legacyPreviewUrl) return null;
+
+  if (failed) {
+    return (
+      <div className="mt-1.5 text-[11px] text-rose-300">
+        تعذر تحميل صورة الفاتورة ({label}).
+      </div>
+    );
+  }
+
+  if (!effectiveUrl) {
+    return (
+      <div className="mt-1.5 text-[11px] text-slate-400">
+        جارٍ تحميل صورة الفاتورة ({label})...
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2.5">
+      <button
+        type="button"
+        onClick={() => onOpenLightbox(effectiveUrl)}
+        className="group relative rounded-lg overflow-hidden border border-slate-700 hover:border-amber-400 transition-colors shrink-0"
+        title="تكبير صورة الفاتورة"
+      >
+        <img
+          src={effectiveUrl}
+          alt={label}
+          className="h-14 w-20 object-cover"
+        />
+      </button>
+      <button
+        type="button"
+        onClick={() => onOpenLightbox(effectiveUrl)}
+        className="inline-flex items-center gap-1.5 text-[11px] text-sky-300 hover:text-sky-200 underline font-semibold"
+      >
+        <Eye className="w-3.5 h-3.5" />
+        <span>معاينة {label}</span>
+      </button>
+    </div>
+  );
+};
 
 
 const FINANCIAL_CATEGORY_LABELS: Record<FinancialCategory, string> = {
@@ -87,41 +176,77 @@ const ROLE_LABELS: Record<AdminRole, string> = {
 };
 
 /* -------------------------------------------------------------------------- */
-/*  Admin Governance Dashboard (§67-§77) with Strict RBAC                     */
+/*  Admin Governance Dashboard (§67-§77) with Server RBAC & Multi-Player D1   */
 /* -------------------------------------------------------------------------- */
 
 export const AdminDashboardView: React.FC<{
-  state: GameState;
+  adminToken?: string;
+  adminConfig: AdminConfig;
+  players: AdminPlayerRecord[];
+  selectedPlayerId: string;
+  onSelectPlayer: (accountId: string) => void;
   now: number;
   adminRole: AdminRole;
   backupSnapshots: AdminBackupSnapshot[];
-  onChangeAdminRole: (role: AdminRole) => void;
+  busyAction?: boolean;
+  onLogout: () => void;
+  onRefreshOverview: () => void;
   onReviewPaymentOrder: (
+    accountId: string,
     orderId: string,
     decision: 'approve' | 'reject' | 'refund',
     note: string
   ) => void;
-  onReviewRegistration: (decision: 'approve' | 'reject', note: string) => void;
-  onCreateBackupSnapshot: (label: string) => void;
-  onRestoreBackupSnapshot: (payloadJson: string) => void;
+  onReviewRegistration: (
+    accountId: string,
+    decision: 'approve' | 'reject',
+    note: string
+  ) => void;
+  onResetPlayerPassword: (
+    accountId: string,
+    newPassword: string
+  ) => Promise<{ error?: string }>;
+  onCreateBackupSnapshot: (label: string, targetAccountId: string) => void;
+  onRestoreBackupSnapshot: (payloadJson: string, targetAccountId: string) => void;
   onDeleteBackupSnapshot: (snapshotId: string) => void;
-  onReverseMarketOffer: (offerId: string, reason: string) => void;
-  onToggleMarketFreeze: (freeze: boolean, reason: string) => void;
+  onReverseMarketOffer: (
+    accountId: string,
+    offerId: string,
+    reason: string
+  ) => void;
+  onToggleMarketFreeze: (
+    accountId: string,
+    freeze: boolean,
+    reason: string
+  ) => void;
   onUpdateAdminConfig: (patch: Partial<AdminConfig>, summary: string) => void;
   onReplySupportTicket: (
+    accountId: string,
     ticketId: string,
     text: string,
     attachments: TicketAttachment[]
   ) => void;
-  onUpdateTicketStatus: (ticketId: string, status: TicketStatus) => void;
+  onUpdateTicketStatus: (
+    accountId: string,
+    ticketId: string,
+    status: TicketStatus
+  ) => void;
   onEnterGameAsAdmin?: () => void;
 }> = ({
-  state,
+  adminToken,
+  adminConfig,
+  players,
+  selectedPlayerId,
+  onSelectPlayer,
+  now,
   adminRole,
   backupSnapshots,
-  onChangeAdminRole,
+  busyAction = false,
+  onLogout,
+  onRefreshOverview,
   onReviewPaymentOrder,
   onReviewRegistration,
+  onResetPlayerPassword,
   onCreateBackupSnapshot,
   onRestoreBackupSnapshot,
   onDeleteBackupSnapshot,
@@ -134,8 +259,26 @@ export const AdminDashboardView: React.FC<{
 }) => {
   const defaultTab = adminRole === 'support' ? 'tickets' : 'payments';
   const [tab, setTab] = useState<
-    'payments' | 'servers' | 'financials' | 'market_ops' | 'config' | 'tickets' | 'backups'
+    | 'payments'
+    | 'players'
+    | 'servers'
+    | 'financials'
+    | 'market_ops'
+    | 'config'
+    | 'tickets'
+    | 'backups'
   >(defaultTab);
+  const [regFilter, setRegFilter] = useState<'pending' | 'all' | 'approved' | 'rejected'>('pending');
+  const [orderStatusFilter, setOrderStatusFilter] = useState<'all' | 'pending' | 'approved' | 'rejected' | 'refunded'>('all');
+  const [playerSearch, setPlayerSearch] = useState('');
+  const [playerRegFilter, setPlayerRegFilter] = useState<'all' | 'pending' | 'approved' | 'rejected'>('all');
+  const [newPlayerPassword, setNewPlayerPassword] = useState('');
+  const [confirmPlayerPassword, setConfirmPlayerPassword] = useState('');
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [passwordResetFeedback, setPasswordResetFeedback] = useState<{ text: string; isError?: boolean } | null>(null);
+  const [resettingPassword, setResettingPassword] = useState(false);
+
+  const [finScopeAccountId, setFinScopeAccountId] = useState<'all' | string>('all');
   const [finFilter, setFinFilter] = useState<'all' | FinancialCategory>('all');
   const [finGroup, setFinGroup] = useState<
     'all' | 'sar_income' | 'gems_economy' | 'trade_points' | 'refunds_flags'
@@ -147,19 +290,46 @@ export const AdminDashboardView: React.FC<{
   const [ticketSearch, setTicketSearch] = useState('');
   const [ticketStatusFilter, setTicketStatusFilter] = useState<'all' | TicketStatus>('all');
   const [supportReplyMap, setSupportReplyMap] = useState<Record<string, string>>({});
-  const [configDraft, setConfigDraft] = useState<AdminConfig>(state.adminConfig);
+  const [configDraft, setConfigDraft] = useState<AdminConfig>(adminConfig);
   const [newServerCode, setNewServerCode] = useState('S3');
   const [newServerName, setNewServerName] = useState('');
   const [newServerCapacity, setNewServerCapacity] = useState(150);
   const [receiptLightbox, setReceiptLightbox] = useState<string | null>(null);
 
   useEffect(() => {
-    setConfigDraft(state.adminConfig);
-  }, [state.adminConfig]);
+    setConfigDraft(adminConfig);
+  }, [adminConfig]);
+
+  useEffect(() => {
+    if (adminRole === 'support' && tab !== 'tickets' && tab !== 'players') {
+      setTab('tickets');
+    } else if (adminRole !== 'founder' && tab === 'backups') {
+      setTab('payments');
+    }
+  }, [adminRole, tab]);
 
   const isFounder = adminRole === 'founder';
   const canViewFinance = adminRole === 'founder' || adminRole === 'partner';
   const canManageSupport = adminRole === 'founder' || adminRole === 'support';
+
+  const selectedPlayer = useMemo(
+    () => players.find((p) => p.accountId === selectedPlayerId) ?? players[0] ?? null,
+    [players, selectedPlayerId]
+  );
+
+  useEffect(() => {
+    setNewPlayerPassword('');
+    setConfirmPlayerPassword('');
+    setPasswordResetFeedback(null);
+  }, [selectedPlayer?.accountId]);
+
+  const scopedPlayers = useMemo(
+    () =>
+      finScopeAccountId === 'all'
+        ? players
+        : players.filter((p) => p.accountId === finScopeAccountId),
+    [players, finScopeAccountId]
+  );
 
   const financialStats = useMemo(() => {
     let totalSarApproved = 0;
@@ -180,43 +350,63 @@ export const AdminDashboardView: React.FC<{
     let marketTradeVolumeGems = 0;
     let tradePointsIssued = 0;
 
-    for (const log of state.financialLogs) {
-      if (log.category === 'payment_refund') {
-        totalRefundSar += Math.abs(log.amountSar);
-      } else if (log.amountSar > 0) {
-        totalSarApproved += log.amountSar;
+    let totalGemsPool = 0;
+    let totalTradeBalance = 0;
+    let openTicketsCount = 0;
+    let maxHqLevel = 0;
+    let pendingSar = 0;
+    let pendingCount = 0;
+
+    for (const player of scopedPlayers) {
+      const st = player.state;
+      totalGemsPool += getTotalGems(st);
+      totalTradeBalance += st.ledger?.tradeBalance ?? 0;
+      openTicketsCount += (st.supportTickets ?? []).filter((t) => t.status !== 'closed').length;
+      maxHqLevel = Math.max(maxHqLevel, getMainBuildingLevel(st));
+
+      for (const ord of st.paymentOrders ?? []) {
+        if (ord.status === 'pending') {
+          pendingSar += ord.amountSar || 0;
+          pendingCount += 1;
+        }
       }
 
-      if (log.category === 'gem_sales' && log.amountSar > 0) {
-        gemPackSar += log.amountSar;
-        gemPackCount += 1;
-      } else if (log.category === 'hakim_subscription' && log.amountSar > 0) {
-        hakimSar += log.amountSar;
-        hakimCount += 1;
-      } else if (log.category === 'vip_subscription' && log.amountSar > 0) {
-        vipSar += log.amountSar;
-        vipCount += 1;
-      } else if (log.category === 'admin_adjustment' && log.amountSar > 0) {
-        regSar += log.amountSar;
-        regCount += 1;
-      }
+      for (const log of st.financialLogs ?? []) {
+        if (log.category === 'payment_refund') {
+          totalRefundSar += Math.abs(log.amountSar);
+        } else if (log.amountSar > 0) {
+          totalSarApproved += log.amountSar;
+        }
 
-      if (log.category === 'market_commission') commissionGems += log.amountGems;
-      if (log.category === 'instant_finish') instantFinishGems += log.amountGems;
-      if (log.category === 'speedup_sales') speedupGems += log.amountGems;
-      if (log.category === 'boost_sales' || log.category === 'shield_sales') {
-        buffsAndShieldsGems += log.amountGems;
-      }
-      if (log.category === 'player_market_trade') {
-        marketTradeVolumeGems += log.amountGems;
-      }
-      if (log.tradePointsDelta > 0) {
-        tradePointsIssued += log.tradePointsDelta;
+        if (log.category === 'gem_sales' && log.amountSar > 0) {
+          gemPackSar += log.amountSar;
+          gemPackCount += 1;
+        } else if (log.category === 'hakim_subscription' && log.amountSar > 0) {
+          hakimSar += log.amountSar;
+          hakimCount += 1;
+        } else if (log.category === 'vip_subscription' && log.amountSar > 0) {
+          vipSar += log.amountSar;
+          vipCount += 1;
+        } else if (log.category === 'admin_adjustment' && log.amountSar > 0) {
+          regSar += log.amountSar;
+          regCount += 1;
+        }
+
+        if (log.category === 'market_commission') commissionGems += log.amountGems;
+        if (log.category === 'instant_finish') instantFinishGems += log.amountGems;
+        if (log.category === 'speedup_sales') speedupGems += log.amountGems;
+        if (log.category === 'boost_sales' || log.category === 'shield_sales') {
+          buffsAndShieldsGems += log.amountGems;
+        }
+        if (log.category === 'player_market_trade') {
+          marketTradeVolumeGems += log.amountGems;
+        }
+        if (log.tradePointsDelta > 0) {
+          tradePointsIssued += log.tradePointsDelta;
+        }
       }
     }
 
-    const pendingOrders = state.paymentOrders.filter((o) => o.status === 'pending');
-    const pendingSar = pendingOrders.reduce((s, o) => s + (o.amountSar || 0), 0);
     const netSar = Math.max(0, totalSarApproved - totalRefundSar);
     const totalSpentGems = instantFinishGems + speedupGems + buffsAndShieldsGems;
 
@@ -225,7 +415,7 @@ export const AdminDashboardView: React.FC<{
       totalRefundSar,
       netSar,
       pendingSar,
-      pendingCount: pendingOrders.length,
+      pendingCount,
       regSar,
       regCount,
       gemPackSar,
@@ -241,12 +431,27 @@ export const AdminDashboardView: React.FC<{
       totalSpentGems,
       marketTradeVolumeGems,
       tradePointsIssued,
+      totalGemsPool,
+      totalTradeBalance,
+      openTicketsCount,
+      maxHqLevel,
     };
-  }, [state.financialLogs, state.paymentOrders]);
+  }, [scopedPlayers]);
+
+  const allScopedFinLogs = useMemo(() => {
+    const items = scopedPlayers.flatMap((p) =>
+      (p.state.financialLogs ?? []).map((log) => ({
+        ...log,
+        ownerAccountId: p.accountId,
+        ownerCommander: p.commanderName,
+      }))
+    );
+    return items.sort((a, b) => b.createdAt - a.createdAt);
+  }, [scopedPlayers]);
 
   const filteredFinLogs = useMemo(() => {
     const q = finSearch.trim().toLowerCase();
-    return state.financialLogs.filter((l) => {
+    return allScopedFinLogs.filter((l) => {
       if (finFilter !== 'all' && l.category !== finFilter) return false;
       if (finGroup === 'sar_income') {
         if (!(l.amountSar > 0 && l.category !== 'payment_refund')) return false;
@@ -276,34 +481,131 @@ export const AdminDashboardView: React.FC<{
         l.referenceId.toLowerCase().includes(q) ||
         l.actionType.toLowerCase().includes(q) ||
         l.source.toLowerCase().includes(q) ||
+        l.ownerAccountId.toLowerCase().includes(q) ||
+        l.ownerCommander.toLowerCase().includes(q) ||
         FINANCIAL_CATEGORY_LABELS[l.category].toLowerCase().includes(q)
       );
     });
-  }, [state.financialLogs, finFilter, finGroup, finSearch]);
+  }, [allScopedFinLogs, finFilter, finGroup, finSearch]);
 
-  const filteredTickets = state.supportTickets.filter((t) => {
-    if (ticketStatusFilter !== 'all' && t.status !== ticketStatusFilter) return false;
-    const q = ticketSearch.trim().toLowerCase();
-    if (!q) return true;
-    return (
-      t.id.toLowerCase().includes(q) ||
-      t.playerName.toLowerCase().includes(q) ||
-      t.accountId.toLowerCase().includes(q) ||
-      t.subject.toLowerCase().includes(q)
+  const allPaymentOrders = useMemo(() => {
+    return players
+      .flatMap((p) =>
+        (p.state.paymentOrders ?? []).map((ord) => ({
+          ...ord,
+          ownerAccountId: p.accountId,
+          ownerCommander: p.commanderName,
+        }))
+      )
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }, [players]);
+
+  const filteredPaymentOrders = useMemo(
+    () =>
+      allPaymentOrders.filter((ord) =>
+        orderStatusFilter === 'all' ? true : ord.status === orderStatusFilter
+      ),
+    [allPaymentOrders, orderStatusFilter]
+  );
+
+  const filteredRegistrations = useMemo(() => {
+    return players.filter((p) => {
+      const st = p.state.registration?.status ?? p.registrationStatus;
+      if (st === 'unregistered') return false;
+      if (regFilter === 'all') return true;
+      return st === regFilter;
+    });
+  }, [players, regFilter]);
+
+  const pendingRegistrationsCount = useMemo(
+    () =>
+      players.filter(
+        (p) => (p.state.registration?.status ?? p.registrationStatus) === 'pending'
+      ).length,
+    [players]
+  );
+
+  const filteredPlayers = useMemo(() => {
+    const q = playerSearch.trim().toLowerCase();
+    return players.filter((p) => {
+      const regSt = p.state.registration?.status ?? p.registrationStatus;
+      if (playerRegFilter !== 'all' && regSt !== playerRegFilter) return false;
+      if (!q) return true;
+      return (
+        p.accountId.toLowerCase().includes(q) ||
+        p.commanderName.toLowerCase().includes(q) ||
+        (p.email ?? '').toLowerCase().includes(q) ||
+        (p.phone ?? '').toLowerCase().includes(q) ||
+        (p.state.registration?.nationalId ?? '').toLowerCase().includes(q) ||
+        (p.state.registration?.fullName ?? '').toLowerCase().includes(q)
+      );
+    });
+  }, [players, playerSearch, playerRegFilter]);
+
+  const allTickets = useMemo(() => {
+    return players
+      .flatMap((p) =>
+        (p.state.supportTickets ?? []).map((t) => ({
+          ...t,
+          ownerAccountId: p.accountId,
+          ownerCommander: p.commanderName,
+        }))
+      )
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+  }, [players]);
+
+  const filteredTickets = useMemo(
+    () =>
+      allTickets.filter((t) => {
+        if (ticketStatusFilter !== 'all' && t.status !== ticketStatusFilter) return false;
+        const q = ticketSearch.trim().toLowerCase();
+        if (!q) return true;
+        return (
+          t.id.toLowerCase().includes(q) ||
+          t.playerName.toLowerCase().includes(q) ||
+          t.accountId.toLowerCase().includes(q) ||
+          t.ownerAccountId.toLowerCase().includes(q) ||
+          t.subject.toLowerCase().includes(q)
+        );
+      }),
+    [allTickets, ticketStatusFilter, ticketSearch]
+  );
+
+  const allMarketOffers = useMemo(() => {
+    return players
+      .flatMap((p) =>
+        (p.state.market?.offers ?? []).map((offer) => ({
+          ...offer,
+          ownerAccountId: p.accountId,
+          ownerCommander: p.commanderName,
+        }))
+      )
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }, [players]);
+
+  const aggregatedAuditLogs = useMemo(() => {
+    const items = players.flatMap((p) =>
+      (p.state.adminAuditLogs ?? []).map((aud) => ({
+        ...aud,
+        ownerAccountId: p.accountId,
+        ownerCommander: p.commanderName,
+      }))
     );
-  });
+    return items.sort((a, b) => b.createdAt - a.createdAt).slice(0, 80);
+  }, [players]);
 
   const navTabs = [
-    { id: 'payments', label: 'المدفوعات والتسجيلات', icon: CreditCard },
+    { id: 'payments', label: `المدفوعات (${pendingRegistrationsCount + allPaymentOrders.filter((o) => o.status === 'pending').length})`, icon: CreditCard },
+    { id: 'players', label: `اللاعبون (${players.length})`, icon: Users },
     { id: 'servers', label: 'السيرفرات', icon: Server },
     { id: 'financials', label: 'التقارير المالية', icon: BarChart3 },
     { id: 'market_ops', label: 'رقابة السوق', icon: AlertTriangle },
     { id: 'config', label: 'الأسعار والدفع', icon: Settings2 },
-    { id: 'tickets', label: 'تذاكر الدعم', icon: LifeBuoy },
+    { id: 'tickets', label: `تذاكر الدعم (${allTickets.filter((t) => t.status !== 'closed').length})`, icon: LifeBuoy },
     ...(isFounder ? ([{ id: 'backups', label: 'النسخ الاحتياطي', icon: Archive }] as const) : []),
   ] as const;
 
-  const servers = state.adminConfig.servers ?? [];
+  const servers = adminConfig.servers ?? [];
   const openServersCount = servers.filter((s) => s.isOpen).length;
 
   const handleToggleServerOpen = (serverId: string) => {
@@ -392,19 +694,19 @@ export const AdminDashboardView: React.FC<{
           }
         />
 
-        {/* RBAC Role Switcher Bar & Founder Direct Game Entry */}
+        {/* Server-Authenticated RBAC Bar */}
         <div className="glass-panel p-4 rounded-2xl border-amber-500/45 flex flex-wrap items-center justify-between gap-3 text-xs">
           <div className="space-y-0.5">
             <div className="font-bold text-amber-300 flex items-center gap-1.5">
               <UserCheck className="w-4 h-4" />
-              <span>محاكي الصلاحيات الإدارية (RBAC): {ROLE_LABELS[adminRole]}</span>
+              <span>الجلسة الإدارية الموثقة (D1): {ROLE_LABELS[adminRole]}</span>
             </div>
             <p className="text-[11px] text-slate-300">
               {adminRole === 'founder'
-                ? 'المؤسس يملك صلاحية فتح وإغلاق السيرفرات، اعتماد المدفوعات، تعديل الأسعار والخصومات، الدخول للعبة للاختبار، والنسخ الاحتياطي.'
+                ? 'المؤسس يملك صلاحية فتح وإغلاق السيرفرات، اعتماد المدفوعات والتسجيلات، تعديل الأسعار وكلمات مرور اللاعبين، والنسخ الاحتياطي.'
                 : adminRole === 'partner'
-                  ? 'الشريك يطّلع على التقارير والمدفوعات فقط (للقراءة دون تعديل أسعار أو اعتماد أو نسخ احتياطي أو وصول لأي ملفات).'
-                  : 'الدعم الفني يطّلع على تذاكر اللاعبين ويرد عليها فقط؛ لا يرى البيانات المالية ولا يعتمد المدفوعات.'}
+                  ? 'الشريك يطّلع على التقارير المالية والمدفوعات واللاعبين للقراءة فقط (دون تعديل أسعار أو اعتماد أو وصول للنسخ الاحتياطي).'
+                  : 'الدعم الفني يطّلع على تذاكر اللاعبين والهويات الأساسية للرد عليها فقط؛ البيانات المالية وإيصالات الدفع محجوبة تلقائيًا من الخادم.'}
             </p>
           </div>
 
@@ -413,42 +715,36 @@ export const AdminDashboardView: React.FC<{
               <button
                 type="button"
                 onClick={onEnterGameAsAdmin}
-                className="min-h-[40px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center gap-1.5 shadow-lg transition-colors"
+                className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center gap-1.5 shadow transition-colors"
               >
                 <Gamepad2 className="w-4 h-4 shrink-0" />
-                <span>دخول مباشر للعبة للاختبار</span>
+                <span>فتح اللعبة</span>
               </button>
             )}
 
-            <div className="flex flex-wrap items-center gap-1.5">
-              {(['founder', 'partner', 'support'] as AdminRole[]).map((role) => (
-                <button
-                  key={role}
-                  type="button"
-                  onClick={() => {
-                    onChangeAdminRole(role);
-                    if (role === 'support') setTab('tickets');
-                    else if (role !== 'founder' && tab === 'backups') setTab('payments');
-                  }}
-                  className={`min-h-[38px] px-3 py-1.5 rounded-xl font-bold border transition-colors ${
-                    adminRole === role
-                      ? 'bg-amber-500 border-amber-300 text-slate-950'
-                      : 'bg-slate-900/90 border-slate-700 text-slate-300 hover:text-white'
-                  }`}
-                >
-                  {role === 'founder'
-                    ? 'المؤسس Founder'
-                    : role === 'partner'
-                      ? 'الشريك Partner'
-                      : 'الدعم Support'}
-                </button>
-              ))}
-            </div>
+            <button
+              type="button"
+              disabled={busyAction}
+              onClick={onRefreshOverview}
+              className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-sky-300 font-bold flex items-center gap-1.5 disabled:opacity-60"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${busyAction ? 'animate-spin' : ''}`} />
+              <span>تحديث من D1</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onLogout}
+              className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-rose-950/70 hover:bg-rose-900/80 border border-rose-500/45 text-rose-200 font-bold flex items-center gap-1.5"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>تبديل الصلاحية / خروج</span>
+            </button>
           </div>
         </div>
 
-        {/* Access Guard for Support role trying non-ticket tabs */}
-        {!canViewFinance && tab !== 'tickets' && (
+        {/* Access Guard for Support role trying finance/server/config tabs */}
+        {!canViewFinance && tab !== 'tickets' && tab !== 'players' && (
           <div className="glass-panel p-6 rounded-2xl border-rose-500/50 flex items-center gap-3 text-xs text-rose-200">
             <Lock className="w-5 h-5 text-rose-400 shrink-0" />
             <div>
@@ -654,128 +950,186 @@ export const AdminDashboardView: React.FC<{
           </div>
         )}
 
-        {/* TAB 1: Registration Reviews (200 SAR) + Payment Orders */}
+        {/* TAB 1: Multi-Player Registration Reviews (200 SAR) + All Payment Orders */}
         {tab === 'payments' && canViewFinance && (
           <div className="space-y-4 text-xs">
-            {/* Player Registration Approval Card */}
-            <div className="glass-panel p-4 rounded-2xl border-amber-500/40 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <div className="font-bold text-sm text-amber-300">
-                    طلبات تسجيل اللاعبين الجديدة (رسوم التفعيل {state.adminConfig.registrationFeeSar || 200} ريال)
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-0.5">
-                    يُسمح للاعب بدخول المدينة فقط بعد مطابقة الهوية وفاتورة الدفع واعتماد المؤسس.
-                  </div>
+            {/* Shared Review Note Input */}
+            {isFounder && (
+              <div className="glass-panel p-3.5 rounded-2xl flex flex-wrap items-center justify-between gap-3">
+                <div className="text-slate-200 font-semibold">
+                  ملاحظة المراجعة الإدارية (تُطبق عند اعتماد أو رفض أو استرداد أي طلب أدناه):
                 </div>
-                <span
-                  className={`px-2.5 py-1 rounded-lg font-bold text-[11px] border ${
-                    state.registration.status === 'approved'
-                      ? 'bg-emerald-500/15 border-emerald-400/50 text-emerald-300'
-                      : state.registration.status === 'pending'
-                        ? 'bg-amber-500/15 border-amber-400/50 text-amber-300'
-                        : 'bg-slate-900 border-slate-700 text-slate-300'
-                  }`}
-                >
-                  {state.registration.status === 'approved'
-                    ? 'حساب معتمد'
-                    : state.registration.status === 'pending'
-                      ? 'بانتظار مراجعة المؤسس'
-                      : state.registration.status === 'rejected'
-                        ? 'مرفوض'
-                        : 'لم يتم التسجيل بعد'}
-                </span>
-              </div>
-
-              {state.registration.status !== 'unregistered' ? (
-                <div className="glass-subpanel p-3.5 rounded-xl flex flex-wrap items-center justify-between gap-4">
-                  <div className="space-y-1 text-[11px]">
-                    <div className="text-slate-100 font-bold text-xs">
-                      الاسم المستعار: {state.registration.nickname} · الاسم الحقيقي: {state.registration.fullName}
-                    </div>
-                    <div className="text-slate-300 font-num">
-                      الهوية: {state.registration.nationalId} · الجوال: {state.registration.phone} · البريد: {state.registration.email}
-                    </div>
-                    <div className="text-emerald-300 font-num">
-                      قيمة الفاتورة: {state.registration.feeAmountSar} ريال
-                      {state.registration.transferRef ? ` · مرجع الحوالة: ${state.registration.transferRef}` : ''}
-                      {state.registration.submittedAt ? ` · ${formatKsaDateTime(state.registration.submittedAt)}` : ''}
-                    </div>
-                    {state.registration.receiptPreviewUrl && (
-                      <button
-                        type="button"
-                        onClick={() => setReceiptLightbox(state.registration.receiptPreviewUrl!)}
-                        className="mt-1 inline-flex items-center gap-1.5 text-sky-300 hover:text-sky-200 underline"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                        <span>معاينة فاتورة الـ {state.registration.feeAmountSar} ريال ({state.registration.receiptName})</span>
-                      </button>
-                    )}
-                  </div>
-
-                  {state.registration.status === 'pending' && (
-                    <div className="flex flex-wrap items-center gap-2 shrink-0">
-                      {!isFounder ? (
-                        <span className="px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-400">
-                          عرض فقط (الشريك)
-                        </span>
-                      ) : (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => onReviewRegistration('approve', orderNote)}
-                            className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold"
-                          >
-                            قبول وتفعيل اللاعب
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onReviewRegistration('reject', orderNote)}
-                            className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold"
-                          >
-                            رفض الطلب
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="text-[11px] text-slate-400">
-                  لا توجد طلبات تسجيل قيد المراجعة حاليًا.
-                </div>
-              )}
-            </div>
-
-            <div className="glass-panel p-4 rounded-2xl flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <div className="font-bold text-sm text-slate-100">
-                  طلبات الدفع والشحن ({state.paymentOrders.length})
-                </div>
-                <div className="text-slate-400 mt-0.5">
-                  تظهر الطلبات بحالة «قيد المراجعة» ولا يضاف الرصيد إلا بعد اعتماد المؤسس.
-                </div>
-              </div>
-              {isFounder && (
                 <input
                   type="text"
                   value={orderNote}
                   onChange={(e) => setOrderNote(e.target.value)}
                   placeholder="ملاحظة مراجعة اختيارية قبل الاعتماد أو الرفض..."
-                  className="min-h-[40px] w-full sm:w-72 px-3 py-1.5 rounded-xl bg-slate-950/85 border border-slate-700 text-slate-100"
+                  className="min-h-[38px] w-full sm:w-80 px-3 py-1.5 rounded-xl bg-slate-950/85 border border-slate-700 text-slate-100"
                 />
+              </div>
+            )}
+
+            {/* Player Registration Approval List (All Players in D1) */}
+            <div className="glass-panel p-4 rounded-2xl border-amber-500/40 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="font-bold text-sm text-amber-300">
+                    طلبات تسجيل اللاعبين الجديدة (رسوم التفعيل {adminConfig.registrationFeeSar || 200} ريال)
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">
+                    تُعرض جميع الحسابات المسجلة من Cloudflare D1، ويُسمح للاعب بدخول المدينة فقط بعد اعتماد المؤسس.
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {(
+                    [
+                      { id: 'pending', label: `بانتظار المراجعة (${pendingRegistrationsCount})` },
+                      { id: 'approved', label: 'المعتمدة' },
+                      { id: 'rejected', label: 'المرفوضة' },
+                      { id: 'all', label: `الكل (${players.length})` },
+                    ] as const
+                  ).map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setRegFilter(f.id)}
+                      className={`min-h-[32px] px-2.5 py-1 rounded-lg font-bold border transition-colors ${
+                        regFilter === f.id
+                          ? 'bg-amber-500 border-amber-300 text-slate-950'
+                          : 'bg-slate-900 border-slate-700 text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {filteredRegistrations.length === 0 ? (
+                <div className="text-[11px] text-slate-400 py-3 text-center">
+                  لا توجد طلبات تسجيل مطابقة لهذا التصنيف حاليًا.
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {filteredRegistrations.map((p) => {
+                    const reg = p.state.registration;
+                    return (
+                      <div
+                        key={p.accountId}
+                        className="glass-subpanel p-3.5 rounded-xl flex flex-wrap items-center justify-between gap-4 border border-slate-800"
+                      >
+                        <div className="space-y-1 text-[11px] min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 font-num font-bold text-amber-300">
+                              {p.accountId}
+                            </span>
+                            <span className="text-slate-100 font-bold text-xs">
+                              {reg.nickname || p.commanderName} · {reg.fullName}
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 rounded font-bold text-[10px] border ${
+                                reg.status === 'approved'
+                                  ? 'bg-emerald-500/15 border-emerald-400/50 text-emerald-300'
+                                  : reg.status === 'pending'
+                                    ? 'bg-amber-500/15 border-amber-400/50 text-amber-300'
+                                    : 'bg-rose-500/15 border-rose-400/50 text-rose-300'
+                              }`}
+                            >
+                              {reg.status === 'approved'
+                                ? 'معتمد'
+                                : reg.status === 'pending'
+                                  ? 'قيد المراجعة'
+                                  : 'مرفوض'}
+                            </span>
+                          </div>
+                          <div className="text-slate-300 font-num">
+                            الهوية: {reg.nationalId || '—'} · الجوال: {reg.phone || p.phone || '—'} · البريد: {reg.email || p.email || '—'} · السيرفر: {p.selectedServerId}
+                          </div>
+                          <div className="text-emerald-300 font-num">
+                            قيمة الفاتورة: {reg.feeAmountSar || adminConfig.registrationFeeSar || 200} ريال
+                            {reg.transferRef ? ` · مرجع الحوالة: ${reg.transferRef}` : ''}
+                            {reg.submittedAt ? ` · ${formatKsaDateTime(reg.submittedAt)}` : ''}
+                          </div>
+                          {reg.reviewNote && (
+                            <div className="text-slate-400">ملاحظة المراجعة: {reg.reviewNote}</div>
+                          )}
+                          <ReceiptPreviewControl
+                            receiptId={reg.receiptId}
+                            legacyPreviewUrl={reg.receiptPreviewUrl}
+                            label={`فاتورة التسجيل (${reg.receiptName || 'مرفق'})`}
+                            adminToken={adminToken}
+                            onOpenLightbox={setReceiptLightbox}
+                          />
+                        </div>
+
+                        {reg.status === 'pending' && (
+                          <div className="flex flex-wrap items-center gap-2 shrink-0">
+                            {!isFounder ? (
+                              <span className="px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-400">
+                                عرض فقط (الشريك)
+                              </span>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  disabled={busyAction}
+                                  onClick={() => onReviewRegistration(p.accountId, 'approve', orderNote)}
+                                  className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold"
+                                >
+                                  قبول وتفعيل اللاعب
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busyAction}
+                                  onClick={() => onReviewRegistration(p.accountId, 'reject', orderNote)}
+                                  className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-60 text-white font-bold"
+                                >
+                                  رفض الطلب
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </div>
 
-            {state.paymentOrders.length === 0 ? (
+            {/* All Payment Orders Across All Players */}
+            <div className="glass-panel p-4 rounded-2xl flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="font-bold text-sm text-slate-100">
+                  طلبات الدفع والشحن عبر المنصة ({filteredPaymentOrders.length} / {allPaymentOrders.length})
+                </div>
+                <div className="text-slate-400 mt-0.5">
+                  تظهر طلبات جميع اللاعبين بحالة «قيد المراجعة» ولا يضاف رصيد الجواهر أو الاشتراكات إلا بعد اعتماد المؤسس وحفظه في D1.
+                </div>
+              </div>
+              <select
+                value={orderStatusFilter}
+                onChange={(e) => setOrderStatusFilter(e.target.value as typeof orderStatusFilter)}
+                className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-950/85 border border-slate-700 text-slate-100 font-bold"
+              >
+                <option value="all">كل الحالات</option>
+                <option value="pending">قيد الانتظار</option>
+                <option value="approved">المعتمدة</option>
+                <option value="rejected">المرفوضة</option>
+                <option value="refunded">المستردة</option>
+              </select>
+            </div>
+
+            {filteredPaymentOrders.length === 0 ? (
               <div className="glass-panel p-8 rounded-2xl text-center text-slate-400">
-                لا توجد طلبات دفع مسجلة حتى الآن. جرّب إرسال طلب من «المتجر والجواهر».
+                لا توجد طلبات دفع مطابقة حاليًا.
               </div>
             ) : (
               <div className="space-y-3">
-                {state.paymentOrders.map((ord) => (
+                {filteredPaymentOrders.map((ord) => (
                   <div
-                    key={ord.id}
+                    key={`${ord.ownerAccountId}-${ord.id}`}
                     className="glass-panel p-4 rounded-2xl flex flex-wrap items-center justify-between gap-4"
                   >
                     <div className="space-y-1 min-w-0 flex-1">
@@ -787,20 +1141,20 @@ export const AdminDashboardView: React.FC<{
                         </span>
                       </div>
                       <div className="text-[11px] text-slate-300 font-num">
-                        اللاعب: {ord.playerName} ({ord.accountId}) · {PAYMENT_METHODS_META[ord.paymentMethod].name} ·{' '}
+                        اللاعب: {ord.ownerCommander} ({ord.ownerAccountId}) · {PAYMENT_METHODS_META[ord.paymentMethod]?.name ?? ord.paymentMethod} ·{' '}
                         {ord.amountSar} ريال · {formatKsaDateTime(ord.createdAt)}
                         {ord.transferRef ? ` · مرجع: ${ord.transferRef}` : ''}
                       </div>
-                      {ord.receiptPreviewUrl && (
-                        <button
-                          type="button"
-                          onClick={() => setReceiptLightbox(ord.receiptPreviewUrl!)}
-                          className="mt-1 inline-flex items-center gap-1.5 text-[11px] text-sky-300 hover:text-sky-200 underline"
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                          <span>معاينة صورة الإيصال ({ord.receiptName})</span>
-                        </button>
+                      {ord.note && (
+                        <div className="text-[11px] text-slate-400">الملاحظة: {ord.note}</div>
                       )}
+                      <ReceiptPreviewControl
+                        receiptId={ord.receiptId}
+                        legacyPreviewUrl={ord.receiptPreviewUrl}
+                        label={`صورة الإيصال (${ord.receiptName || 'مرفق'})`}
+                        adminToken={adminToken}
+                        onOpenLightbox={setReceiptLightbox}
+                      />
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -812,15 +1166,17 @@ export const AdminDashboardView: React.FC<{
                         <>
                           <button
                             type="button"
-                            onClick={() => onReviewPaymentOrder(ord.id, 'approve', orderNote)}
-                            className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold"
+                            disabled={busyAction}
+                            onClick={() => onReviewPaymentOrder(ord.ownerAccountId, ord.id, 'approve', orderNote)}
+                            className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold"
                           >
                             اعتماد وإضافة الرصيد
                           </button>
                           <button
                             type="button"
-                            onClick={() => onReviewPaymentOrder(ord.id, 'reject', orderNote)}
-                            className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold"
+                            disabled={busyAction}
+                            onClick={() => onReviewPaymentOrder(ord.ownerAccountId, ord.id, 'reject', orderNote)}
+                            className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-60 text-white font-bold"
                           >
                             رفض
                           </button>
@@ -828,8 +1184,9 @@ export const AdminDashboardView: React.FC<{
                       ) : ord.status === 'approved' ? (
                         <button
                           type="button"
-                          onClick={() => onReviewPaymentOrder(ord.id, 'refund', orderNote)}
-                          className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold"
+                          disabled={busyAction}
+                          onClick={() => onReviewPaymentOrder(ord.ownerAccountId, ord.id, 'refund', orderNote)}
+                          className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-60 text-white font-bold"
                         >
                           استرداد مالي
                         </button>
@@ -846,9 +1203,297 @@ export const AdminDashboardView: React.FC<{
           </div>
         )}
 
-        {/* TAB 2: Clear Executive Financial Reports & Ledger */}
+        {/* TAB: Players & Manual Password Reset */}
+        {tab === 'players' && (
+          <div className="space-y-4 text-xs">
+            <div className="glass-panel p-4 rounded-2xl flex flex-wrap items-center gap-3">
+              <div className="relative flex-1 min-w-[220px]">
+                <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={playerSearch}
+                  onChange={(e) => setPlayerSearch(e.target.value)}
+                  placeholder="ابحث بالاسم المستعار أو الحقيقي أو البريد أو الجوال أو ENG-..."
+                  className="w-full min-h-[40px] pr-9 pl-3 py-1.5 rounded-xl bg-slate-950/85 border border-slate-700 text-slate-100"
+                />
+              </div>
+              <select
+                value={playerRegFilter}
+                onChange={(e) => setPlayerRegFilter(e.target.value as typeof playerRegFilter)}
+                className="min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-950/85 border border-slate-700 text-slate-100"
+              >
+                <option value="all">جميع الحسابات ({players.length})</option>
+                <option value="pending">قيد المراجعة</option>
+                <option value="approved">المعتمدة</option>
+                <option value="rejected">المرفوضة</option>
+              </select>
+            </div>
+
+            {filteredPlayers.length === 0 ? (
+              <div className="glass-panel p-8 rounded-2xl text-center text-slate-400">
+                لا توجد حسابات لاعبين مسجلة مطابقة للبحث في D1 حاليًا.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                {/* Players List */}
+                <div className="lg:col-span-5 glass-panel rounded-2xl overflow-hidden max-h-[680px] flex flex-col">
+                  <div className="px-4 py-3 border-b border-slate-800 font-bold text-slate-200 flex items-center justify-between">
+                    <span>قائمة حسابات اللاعبين ({filteredPlayers.length})</span>
+                    <span className="text-[11px] text-slate-400">اختر حسابًا للتفاصيل</span>
+                  </div>
+                  <div className="divide-y divide-slate-800/70 overflow-y-auto">
+                    {filteredPlayers.map((p) => {
+                      const isSel = selectedPlayer?.accountId === p.accountId;
+                      const regStatus = p.state.registration?.status ?? p.registrationStatus;
+                      return (
+                        <button
+                          key={p.accountId}
+                          type="button"
+                          onClick={() => onSelectPlayer(p.accountId)}
+                          className={`w-full text-right p-3.5 transition-colors flex flex-col gap-1.5 ${
+                            isSel
+                              ? 'bg-[#1D4ED8]/20 border-r-4 border-amber-400'
+                              : 'hover:bg-slate-800/40'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-bold text-slate-100 truncate">
+                              {p.commanderName}
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold border shrink-0 ${
+                                regStatus === 'approved'
+                                  ? 'bg-emerald-500/15 border-emerald-400/50 text-emerald-300'
+                                  : regStatus === 'pending'
+                                    ? 'bg-amber-500/15 border-amber-400/50 text-amber-300'
+                                    : 'bg-rose-500/15 border-rose-400/50 text-rose-300'
+                              }`}
+                            >
+                              {regStatus === 'approved'
+                                ? 'معتمد'
+                                : regStatus === 'pending'
+                                  ? 'بانتظار الاعتماد'
+                                  : regStatus === 'rejected'
+                                    ? 'مرفوض'
+                                    : 'غير مكتمل'}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400 font-num">
+                            <span className="text-amber-300">{p.accountId}</span>
+                            <span>
+                              المقر Lv.{getMainBuildingLevel(p.state)} ·{' '}
+                              {canViewFinance ? `${formatNumber(getTotalGems(p.state))} جوهرة` : p.selectedServerId}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-slate-400 truncate">
+                            {p.email || 'بدون بريد'} · {p.phone || 'بدون جوال'}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Selected Player Details + Manual Password Reset */}
+                <div className="lg:col-span-7 space-y-4">
+                  {selectedPlayer && (
+                    <>
+                      <div className="glass-panel p-4 sm:p-5 rounded-2xl space-y-3 border-sky-500/35">
+                        <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-800">
+                          <div>
+                            <div className="text-sm font-bold text-amber-300">
+                              {selectedPlayer.commanderName}
+                            </div>
+                            <div className="text-[11px] text-slate-400 font-num">
+                              معرّف الحساب: {selectedPlayer.accountId} · النسخة (Revision): #{selectedPlayer.revision}
+                            </div>
+                          </div>
+                          <span className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700 text-[11px] font-num text-sky-300">
+                            السيرفر: {selectedPlayer.selectedServerId}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-[11px] font-num">
+                          <div className="glass-subpanel p-2.5 rounded-xl">
+                            <span className="text-slate-400 block">البريد الإلكتروني</span>
+                            <span className="text-slate-100 font-semibold">{selectedPlayer.email || 'غير مضاف'}</span>
+                          </div>
+                          <div className="glass-subpanel p-2.5 rounded-xl">
+                            <span className="text-slate-400 block">رقم الجوال</span>
+                            <span className="text-slate-100 font-semibold">{selectedPlayer.phone || 'غير مضاف'}</span>
+                          </div>
+                          <div className="glass-subpanel p-2.5 rounded-xl">
+                            <span className="text-slate-400 block">الاسم الحقيقي والهوية</span>
+                            <span className="text-slate-100 font-semibold">
+                              {selectedPlayer.state.registration?.fullName || '—'} · {selectedPlayer.state.registration?.nationalId || '—'}
+                            </span>
+                          </div>
+                          <div className="glass-subpanel p-2.5 rounded-xl">
+                            <span className="text-slate-400 block">آخر تحديث في D1</span>
+                            <span className="text-slate-100 font-semibold">
+                              {formatKsaDateTime(selectedPlayer.updatedAt)}
+                            </span>
+                          </div>
+                        </div>
+
+                        {canViewFinance && (
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-1 font-num">
+                            <div className="glass-subpanel p-2.5 rounded-xl">
+                              <span className="text-[10px] text-slate-400 block">جواهر مشحونة</span>
+                              <span className="font-bold text-amber-300">{formatDecimal(selectedPlayer.state.gemLedger.chargedGems)}</span>
+                            </div>
+                            <div className="glass-subpanel p-2.5 rounded-xl">
+                              <span className="text-[10px] text-slate-400 block">جواهر إضافية / سوق</span>
+                              <span className="font-bold text-sky-300">
+                                {formatDecimal(selectedPlayer.state.gemLedger.bonusGems + selectedPlayer.state.gemLedger.marketGems)}
+                              </span>
+                            </div>
+                            <div className="glass-subpanel p-2.5 rounded-xl">
+                              <span className="text-[10px] text-slate-400 block">نقاط التجارة</span>
+                              <span className="font-bold text-purple-300">{formatDecimal(selectedPlayer.state.ledger.tradeBalance)}</span>
+                            </div>
+                            <div className="glass-subpanel p-2.5 rounded-xl">
+                              <span className="text-[10px] text-slate-400 block">الاشتراكات</span>
+                              <span className="font-bold text-emerald-300">
+                                {selectedPlayer.state.hakimSubscription?.active ? 'حكيم ✓' : 'حكيم —'} · {selectedPlayer.state.vipSubscription?.active ? 'VIP ✓' : 'VIP —'}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Founder-Only Manual Password Reset */}
+                      {isFounder && (
+                        <form
+                          onSubmit={async (e) => {
+                            e.preventDefault();
+                            setPasswordResetFeedback(null);
+                            if (newPlayerPassword.length < 8) {
+                              setPasswordResetFeedback({
+                                text: 'كلمة المرور الجديدة يجب أن تكون 8 أحرف أو أرقام على الأقل.',
+                                isError: true,
+                              });
+                              return;
+                            }
+                            if (newPlayerPassword !== confirmPlayerPassword) {
+                              setPasswordResetFeedback({
+                                text: 'كلمتا المرور غير متطابقتين.',
+                                isError: true,
+                              });
+                              return;
+                            }
+                            setResettingPassword(true);
+                            const res = await onResetPlayerPassword(
+                              selectedPlayer.accountId,
+                              newPlayerPassword
+                            );
+                            setResettingPassword(false);
+                            if (res.error) {
+                              setPasswordResetFeedback({ text: res.error, isError: true });
+                            } else {
+                              setNewPlayerPassword('');
+                              setConfirmPlayerPassword('');
+                              setPasswordResetFeedback({
+                                text: `تم تعيين كلمة المرور الجديدة لحساب ${selectedPlayer.commanderName} وإلغاء جميع جلساته السابقة.`,
+                              });
+                            }
+                          }}
+                          className="glass-panel p-4 sm:p-5 rounded-2xl border-amber-500/40 space-y-3"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <h4 className="font-bold text-sm text-amber-300 flex items-center gap-1.5">
+                              <KeyRound className="w-4 h-4" />
+                              <span>تعديل كلمة مرور اللاعب يدويًا (بدل البريد التلقائي)</span>
+                            </h4>
+                            <span className="text-[10px] text-slate-400">حصري للمؤسس</span>
+                          </div>
+                          <p className="text-[11px] text-slate-300 leading-relaxed">
+                            عند نسيان اللاعب لكلمة مروره وتواصله معك، عيّن له كلمة مرور جديدة هنا ليتم حفظها مشفرة في Cloudflare D1 وإغلاق أي جلسات قديمة له فورًا.
+                          </p>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                            <div className="relative">
+                              <input
+                                type={showNewPassword ? 'text' : 'password'}
+                                value={newPlayerPassword}
+                                onChange={(e) => setNewPlayerPassword(e.target.value)}
+                                placeholder="كلمة المرور الجديدة (8 أحرف فأكثر)"
+                                className="w-full min-h-[40px] pl-10 pr-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-700 text-slate-100"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setShowNewPassword((v) => !v)}
+                                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200"
+                                title={showNewPassword ? 'إخفاء' : 'إظهار'}
+                              >
+                                {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                              </button>
+                            </div>
+                            <input
+                              type={showNewPassword ? 'text' : 'password'}
+                              value={confirmPlayerPassword}
+                              onChange={(e) => setConfirmPlayerPassword(e.target.value)}
+                              placeholder="تأكيد كلمة المرور الجديدة"
+                              className="w-full min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-700 text-slate-100"
+                            />
+                          </div>
+
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <button
+                              type="submit"
+                              disabled={resettingPassword}
+                              className="min-h-[40px] px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 font-bold flex items-center gap-1.5"
+                            >
+                              <KeyRound className="w-4 h-4" />
+                              <span>{resettingPassword ? 'جارٍ الحفظ في D1...' : 'حفظ كلمة المرور الجديدة'}</span>
+                            </button>
+                          </div>
+
+                          {passwordResetFeedback && (
+                            <div
+                              className={`p-2.5 rounded-xl text-[11px] font-semibold border ${
+                                passwordResetFeedback.isError
+                                  ? 'bg-rose-950/60 border-rose-500/45 text-rose-200'
+                                  : 'bg-emerald-950/60 border-emerald-500/45 text-emerald-200'
+                              }`}
+                            >
+                              {passwordResetFeedback.text}
+                            </div>
+                          )}
+                        </form>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 2: Clear Executive Financial Reports & Ledger (Multi-Player D1) */}
         {tab === 'financials' && canViewFinance && (
           <div className="space-y-5 text-xs">
+            <div className="glass-panel p-4 rounded-2xl flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="font-bold text-sm text-slate-100">نطاق التقرير المالي</div>
+                <div className="text-[11px] text-slate-400">
+                  يمكنك عرض إجمالي المنصة بالكامل عبر جميع اللاعبين أو تحديد حساب لاعب بعينه.
+                </div>
+              </div>
+              <select
+                value={finScopeAccountId}
+                onChange={(e) => setFinScopeAccountId(e.target.value)}
+                className="min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-700 text-amber-300 font-bold"
+              >
+                <option value="all">جميع اللاعبين (إجمالي المنصة — {players.length})</option>
+                {players.map((p) => (
+                  <option key={p.accountId} value={p.accountId}>
+                    {p.commanderName} ({p.accountId})
+                  </option>
+                ))}
+              </select>
+            </div>
+
             {/* 1. Top 4 Clear KPI Summary Cards */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
               <div className="glass-panel p-4 rounded-2xl border-emerald-500/40 space-y-1.5">
@@ -879,11 +1524,11 @@ export const AdminDashboardView: React.FC<{
 
               <div className="glass-panel p-4 rounded-2xl border-sky-500/35 space-y-1.5">
                 <div className="flex items-center justify-between text-slate-300">
-                  <span className="font-semibold">اقتصاد الجواهر باللعبة</span>
+                  <span className="font-semibold">اقتصاد الجواهر بالمنصة</span>
                   <Gem className="w-4 h-4 text-sky-300" />
                 </div>
                 <div className="text-2xl font-num font-bold text-sky-300">
-                  {formatNumber(getTotalGems(state))} جوهرة
+                  {formatNumber(financialStats.totalGemsPool)} جوهرة
                 </div>
                 <div className="text-[11px] text-slate-400 font-num">
                   مستهلَك باللعبة: {formatDecimal(financialStats.totalSpentGems)} · عمولة سوق: {formatDecimal(financialStats.commissionGems)}
@@ -896,10 +1541,10 @@ export const AdminDashboardView: React.FC<{
                   <Coins className="w-4 h-4 text-purple-300" />
                 </div>
                 <div className="text-2xl font-num font-bold text-purple-300">
-                  {formatDecimal(state.ledger.tradeBalance)} نقطة
+                  {formatDecimal(financialStats.totalTradeBalance)} نقطة
                 </div>
-                <div className="text-[11px] text-slate-400">
-                  المبنى الرئيسي: مستوى {getMainBuildingLevel(state)} · تذاكر مفتوحة: {state.supportTickets.filter((t) => t.status !== 'closed').length}
+                <div className="text-[11px] text-slate-400 font-num">
+                  أعلى مقر: مستوى {financialStats.maxHqLevel} · تذاكر مفتوحة: {financialStats.openTicketsCount}
                 </div>
               </div>
             </div>
@@ -1047,7 +1692,7 @@ export const AdminDashboardView: React.FC<{
                       سجل العمليات المالية المفصّل
                     </span>
                     <span className="text-[11px] text-slate-400 mr-2 font-num">
-                      ({filteredFinLogs.length} من أصل {state.financialLogs.length} عملية)
+                      ({filteredFinLogs.length} من أصل {allScopedFinLogs.length} عملية)
                     </span>
                   </div>
 
@@ -1135,7 +1780,9 @@ export const AdminDashboardView: React.FC<{
                           </td>
                           <td className="py-2.5 px-3 text-slate-100">
                             <div className="font-semibold">{log.actionType}</div>
-                            <div className="text-[10px] text-slate-400">{log.source}</div>
+                            <div className="text-[10px] text-slate-400">
+                              {log.ownerCommander} ({log.ownerAccountId}) · {log.source}
+                            </div>
                           </td>
                           <td className="py-2.5 px-3 font-num font-bold whitespace-nowrap">
                             {log.amountSar !== 0 ? (
@@ -1184,95 +1831,127 @@ export const AdminDashboardView: React.FC<{
           </div>
         )}
 
-        {/* TAB 3: Market Anti-Manipulation & Oversight */}
+        {/* TAB 3: Market Anti-Manipulation & Oversight (Multi-Player D1) */}
         {tab === 'market_ops' && canViewFinance && (
           <div className="space-y-4 text-xs">
             <div className="glass-panel p-4 rounded-2xl flex flex-wrap items-center justify-between gap-3">
               <div className="space-y-1">
                 <div className="font-bold text-sm text-slate-100 flex items-center gap-2">
                   <ShieldAlert className="w-4 h-4 text-amber-400" />
-                  <span>حالة تداول اللاعب في السوق</span>
+                  <span>حالة تداول اللاعب المختار في السوق</span>
                 </div>
-                <div className="text-slate-300 font-num">
-                  التجميد الإداري: {state.market.marketFrozenForPlayer ? 'مجمّد ❄️' : 'نشط ✓'} ·{' '}
-                  الدين الداخلي من عكس الصفقات: {state.market.playerInternalDebtGems} جوهرة
-                </div>
+                {selectedPlayer ? (
+                  <div className="text-slate-300 font-num">
+                    الحساب: {selectedPlayer.commanderName} ({selectedPlayer.accountId}) · التجميد الإداري:{' '}
+                    {selectedPlayer.state.market.marketFrozenForPlayer ? 'مجمّد ❄️' : 'نشط ✓'} ·{' '}
+                    الدين الداخلي: {selectedPlayer.state.market.playerInternalDebtGems} جوهرة
+                  </div>
+                ) : (
+                  <div className="text-slate-400">لا يوجد لاعبون مسجلون حاليًا.</div>
+                )}
               </div>
-              {isFounder && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    onToggleMarketFreeze(
-                      !state.market.marketFrozenForPlayer,
-                      state.market.marketFrozenForPlayer
-                        ? 'فك تجميد الحساب بعد المراجعة'
-                        : 'تجميد مؤقت للاشتباه بتلاعب سعري'
-                    )
-                  }
-                  className={`min-h-[40px] px-4 py-2 rounded-xl font-bold flex items-center gap-1.5 ${
-                    state.market.marketFrozenForPlayer
-                      ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                      : 'bg-rose-600 hover:bg-rose-500 text-white'
-                  }`}
-                >
-                  <Snowflake className="w-4 h-4" />
-                  <span>
-                    {state.market.marketFrozenForPlayer
-                      ? 'فك تجميد تداول الحساب'
-                      : 'تجميد تداول الحساب في السوق'}
-                  </span>
-                </button>
-              )}
+
+              <div className="flex flex-wrap items-center gap-2">
+                {players.length > 0 && (
+                  <select
+                    value={selectedPlayer?.accountId ?? ''}
+                    onChange={(e) => onSelectPlayer(e.target.value)}
+                    className="min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-700 text-amber-300 font-bold"
+                  >
+                    {players.map((p) => (
+                      <option key={p.accountId} value={p.accountId}>
+                        {p.commanderName} ({p.accountId})
+                      </option>
+                    ))}
+                  </select>
+                )}
+
+                {isFounder && selectedPlayer && (
+                  <button
+                    type="button"
+                    disabled={busyAction}
+                    onClick={() =>
+                      onToggleMarketFreeze(
+                        selectedPlayer.accountId,
+                        !selectedPlayer.state.market.marketFrozenForPlayer,
+                        selectedPlayer.state.market.marketFrozenForPlayer
+                          ? 'فك تجميد الحساب بعد المراجعة'
+                          : 'تجميد مؤقت للاشتباه بتلاعب سعري'
+                      )
+                    }
+                    className={`min-h-[40px] px-4 py-2 rounded-xl font-bold flex items-center gap-1.5 disabled:opacity-60 ${
+                      selectedPlayer.state.market.marketFrozenForPlayer
+                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                        : 'bg-rose-600 hover:bg-rose-500 text-white'
+                    }`}
+                  >
+                    <Snowflake className="w-4 h-4" />
+                    <span>
+                      {selectedPlayer.state.market.marketFrozenForPlayer
+                        ? 'فك تجميد تداول الحساب'
+                        : 'تجميد تداول الحساب في السوق'}
+                    </span>
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="glass-panel rounded-2xl overflow-hidden">
               <div className="px-4 py-3 border-b border-slate-700/45 font-bold text-slate-100">
-                عروض السوق الخاضعة للرقابة ({state.market.offers.length})
+                عروض السوق الخاضعة للرقابة عبر جميع اللاعبين ({allMarketOffers.length})
               </div>
-              <div className="divide-y divide-slate-800/70">
-                {state.market.offers.map((offer) => (
-                  <div
-                    key={offer.id}
-                    className="p-3.5 sm:px-4 flex flex-wrap items-center justify-between gap-3"
-                  >
-                    <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-num font-bold text-amber-300">{offer.id}</span>
-                        <span className="font-bold text-slate-100">
-                          {MARKET_RESOURCES_META[offer.resource].name}
-                        </span>
-                        <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-[10px]">
-                          {offer.status}
-                        </span>
-                        {offer.suspiciousFlag && (
-                          <span className="px-2 py-0.5 rounded bg-rose-500/20 border border-rose-400/50 text-rose-300 text-[10px] font-bold">
-                            معلّم للمراجعة
+              {allMarketOffers.length === 0 ? (
+                <div className="p-8 text-center text-slate-400">
+                  لا توجد عروض سوق مسجلة حاليًا.
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-800/70">
+                  {allMarketOffers.map((offer) => (
+                    <div
+                      key={`${offer.ownerAccountId}-${offer.id}`}
+                      className="p-3.5 sm:px-4 flex flex-wrap items-center justify-between gap-3"
+                    >
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-num font-bold text-amber-300">{offer.id}</span>
+                          <span className="font-bold text-slate-100">
+                            {MARKET_RESOURCES_META[offer.resource].name}
                           </span>
-                        )}
+                          <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-[10px]">
+                            {offer.status}
+                          </span>
+                          {offer.suspiciousFlag && (
+                            <span className="px-2 py-0.5 rounded bg-rose-500/20 border border-rose-400/50 text-rose-300 text-[10px] font-bold">
+                              معلّم للمراجعة
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-slate-400 font-num">
+                          البائع: {offer.sellerName} ({offer.ownerAccountId}) · الكمية: {offer.remainingQty}/{offer.initialQty} · السعر: {offer.unitPriceGems} جوهرة
+                        </div>
                       </div>
-                      <div className="text-[11px] text-slate-400 font-num">
-                        البائع: {offer.sellerName} ({offer.sellerId}) · الكمية: {offer.remainingQty}/{offer.initialQty} · السعر: {offer.unitPriceGems} جوهرة
-                      </div>
-                    </div>
 
-                    {isFounder && offer.status !== 'admin_cancelled' && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onReverseMarketOffer(
-                            offer.id,
-                            'عكس صفقة لمكافحة غسل الجواهر واسترداد المبالغ'
-                          )
-                        }
-                        className="min-h-[38px] px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold flex items-center gap-1.5"
-                      >
-                        <RefreshCw className="w-3.5 h-3.5" />
-                        <span>إلغاء / عكس الصفقة</span>
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
+                      {isFounder && offer.status !== 'admin_cancelled' && (
+                        <button
+                          type="button"
+                          disabled={busyAction}
+                          onClick={() =>
+                            onReverseMarketOffer(
+                              offer.ownerAccountId,
+                              offer.id,
+                              'عكس صفقة لمكافحة غسل الجواهر واسترداد المبالغ'
+                            )
+                          }
+                          className="min-h-[38px] px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-60 text-white font-bold flex items-center gap-1.5"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          <span>إلغاء / عكس الصفقة</span>
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -1908,21 +2587,22 @@ export const AdminDashboardView: React.FC<{
               </div>
             </div>
 
-            {/* Admin Audit Logs */}
+            {/* Admin Audit Logs Across Platform */}
             <div className="glass-panel rounded-2xl overflow-hidden">
               <div className="px-4 py-3 border-b border-slate-700/45 font-bold text-slate-100 flex items-center gap-2">
                 <FileText className="w-4 h-4 text-sky-300" />
-                <span>سجل التدقيق الإداري ({state.adminAuditLogs.length})</span>
+                <span>سجل التدقيق الإداري ({aggregatedAuditLogs.length})</span>
               </div>
               <div className="divide-y divide-slate-800/70 max-h-64 overflow-y-auto">
-                {state.adminAuditLogs.length === 0 ? (
+                {aggregatedAuditLogs.length === 0 ? (
                   <div className="p-5 text-center text-slate-400">لا توجد تغييرات إدارية مسجلة بعد.</div>
                 ) : (
-                  state.adminAuditLogs.map((aud) => (
-                    <div key={aud.id} className="p-3 flex flex-wrap justify-between gap-2">
+                  aggregatedAuditLogs.map((aud) => (
+                    <div key={`${aud.ownerAccountId}-${aud.id}`} className="p-3 flex flex-wrap justify-between gap-2">
                       <div>
                         <span className="font-bold text-amber-300">{aud.actorName}</span> ·{' '}
-                        <span className="font-bold text-slate-100">{aud.action}</span>
+                        <span className="font-bold text-slate-100">{aud.action}</span>{' '}
+                        <span className="text-[10px] text-sky-300 font-num">({aud.ownerCommander})</span>
                         <div className="text-[11px] text-slate-400">{aud.details}</div>
                       </div>
                       <span className="font-num text-[11px] text-slate-400">
@@ -1936,7 +2616,7 @@ export const AdminDashboardView: React.FC<{
           </div>
         )}
 
-        {/* TAB 5: Admin Support Desk */}
+        {/* TAB 5: Admin Support Desk (Multi-Player D1) */}
         {tab === 'tickets' && canManageSupport && (
           <div className="space-y-4 text-xs">
             <div className="glass-panel p-4 rounded-2xl flex flex-wrap items-center gap-3">
@@ -1971,19 +2651,26 @@ export const AdminDashboardView: React.FC<{
             ) : (
               <div className="space-y-3">
                 {filteredTickets.map((t) => (
-                  <div key={t.id} className="glass-panel p-4 rounded-2xl space-y-3">
+                  <div key={`${t.ownerAccountId}-${t.id}`} className="glass-panel p-4 rounded-2xl space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-800">
                       <div>
                         <span className="font-num font-bold text-amber-300">{t.id}</span> ·{' '}
                         <span className="font-bold text-slate-100">{t.subject}</span>
                         <div className="text-[11px] text-slate-400 font-num mt-0.5">
-                          {t.playerName} ({t.accountId}) · {t.category}
+                          {t.ownerCommander} ({t.ownerAccountId}) · {t.category}
                         </div>
                       </div>
 
                       <select
                         value={t.status}
-                        onChange={(e) => onUpdateTicketStatus(t.id, e.target.value as TicketStatus)}
+                        disabled={busyAction}
+                        onChange={(e) =>
+                          onUpdateTicketStatus(
+                            t.ownerAccountId,
+                            t.id,
+                            e.target.value as TicketStatus
+                          )
+                        }
                         className="min-h-[36px] px-2.5 py-1 rounded-xl bg-slate-900 border border-slate-700 text-sky-200 font-bold"
                       >
                         {(Object.keys(TICKET_STATUS_LABELS) as TicketStatus[]).map((st) => (
@@ -2015,13 +2702,14 @@ export const AdminDashboardView: React.FC<{
                       />
                       <button
                         type="button"
+                        disabled={busyAction}
                         onClick={() => {
                           const txt = supportReplyMap[t.id] ?? '';
                           if (!txt.trim()) return;
-                          onReplySupportTicket(t.id, txt, []);
+                          onReplySupportTicket(t.ownerAccountId, t.id, txt, []);
                           setSupportReplyMap((p) => ({ ...p, [t.id]: '' }));
                         }}
-                        className="min-h-[40px] px-4 py-1.5 rounded-xl bg-[#1D4ED8] hover:bg-blue-600 text-white font-bold flex items-center gap-1"
+                        className="min-h-[40px] px-4 py-1.5 rounded-xl bg-[#1D4ED8] hover:bg-blue-600 disabled:opacity-60 text-white font-bold flex items-center gap-1"
                       >
                         <CheckCircle2 className="w-3.5 h-3.5" />
                         <span>إرسال الرد</span>
@@ -2034,7 +2722,7 @@ export const AdminDashboardView: React.FC<{
           </div>
         )}
 
-        {/* TAB 6: Founder-Only Data Backup & Restore + Source/GDD Vault */}
+        {/* TAB 6: Founder-Only Data Backup & Restore + Source/GDD Vault (D1) */}
         {tab === 'backups' && isFounder && (
           <div className="space-y-4 text-xs">
             <Suspense
@@ -2044,7 +2732,7 @@ export const AdminDashboardView: React.FC<{
                 </div>
               }
             >
-              <FounderVaultSection adminConfig={state.adminConfig} />
+              <FounderVaultSection adminConfig={adminConfig} />
             </Suspense>
 
             <div className="glass-panel p-5 rounded-2xl border-emerald-500/40 space-y-4">
@@ -2052,12 +2740,26 @@ export const AdminDashboardView: React.FC<{
                 <div>
                   <h3 className="text-sm font-bold text-emerald-300 flex items-center gap-2">
                     <HardDriveDownload className="w-4 h-4" />
-                    <span>النسخ الاحتياطي لبيانات اللعبة والحسابات (حصري للمؤسس)</span>
+                    <span>النسخ الاحتياطي السحابي في D1 (حصري للمؤسس)</span>
                   </h3>
                   <p className="text-[11px] text-slate-300 mt-1">
-                    يحفظ هذا القسم لقطات نسخ احتياطية فورية لبيانات التقدم، الحسابات، السجلات المالية، وإعدادات التوازن مع إمكانية التصدير والاستعادة.
+                    تُحفظ النسخ الاحتياطية الآن داخل قاعدة Cloudflare D1 ويمكن استعادتها أو تصديرها لأي حساب لاعب في أي وقت.
                   </p>
                 </div>
+
+                {players.length > 0 && (
+                  <select
+                    value={selectedPlayer?.accountId ?? ''}
+                    onChange={(e) => onSelectPlayer(e.target.value)}
+                    className="min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-700 text-amber-300 font-bold"
+                  >
+                    {players.map((p) => (
+                      <option key={p.accountId} value={p.accountId}>
+                        الحساب المستهدف: {p.commanderName} ({p.accountId})
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center gap-2.5">
@@ -2070,54 +2772,64 @@ export const AdminDashboardView: React.FC<{
                 />
                 <button
                   type="button"
+                  disabled={!selectedPlayer || busyAction}
                   onClick={() => {
-                    onCreateBackupSnapshot(backupLabel);
+                    if (!selectedPlayer) return;
+                    onCreateBackupSnapshot(backupLabel, selectedPlayer.accountId);
                     setBackupLabel('');
-                    setBackupFeedback('تم إنشاء وحفظ النسخة الاحتياطية لبيانات اللعبة.');
+                    setBackupFeedback(`تم إنشاء وحفظ النسخة الاحتياطية في D1 لحساب ${selectedPlayer.commanderName}.`);
                   }}
-                  className="min-h-[42px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center gap-1.5"
+                  className="min-h-[42px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold flex items-center gap-1.5"
                 >
                   <Archive className="w-4 h-4" />
-                  <span>إنشاء نسخة احتياطية الآن</span>
+                  <span>إنشاء نسخة في D1</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => {
-                    const blob = new Blob([JSON.stringify(state, null, 2)], {
+                    const exportObj = selectedPlayer
+                      ? selectedPlayer.state
+                      : { exportedAt: now, adminConfig, playersCount: players.length };
+                    const blob = new Blob([JSON.stringify(exportObj, null, 2)], {
                       type: 'application/json',
                     });
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = `ENGINORA_DATA_BACKUP_${Date.now()}.json`;
+                    a.download = `ENGINORA_${selectedPlayer ? selectedPlayer.accountId : 'PLATFORM'}_${Date.now()}.json`;
                     a.click();
                     URL.revokeObjectURL(url);
                   }}
                   className="min-h-[42px] px-4 py-2 rounded-xl bg-[#1D4ED8] hover:bg-blue-600 text-white font-bold flex items-center gap-1.5"
                 >
                   <Download className="w-4 h-4" />
-                  <span>تصدير ملف بيانات (JSON)</span>
+                  <span>تصدير بيانات الحساب (JSON)</span>
                 </button>
-                <label className="min-h-[42px] px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-amber-200 font-bold flex items-center gap-1.5 cursor-pointer">
-                  <Upload className="w-4 h-4" />
-                  <span>استيراد واستعادة بيانات</span>
-                  <input
-                    type="file"
-                    accept="application/json,.json"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (!file) return;
-                      const reader = new FileReader();
-                      reader.onload = () => {
-                        onRestoreBackupSnapshot(String(reader.result ?? ''));
-                        setBackupFeedback(`تمت استعادة البيانات من الملف "${file.name}".`);
-                      };
-                      reader.readAsText(file);
-                      e.target.value = '';
-                    }}
-                    className="hidden"
-                  />
-                </label>
+                {selectedPlayer && (
+                  <label className="min-h-[42px] px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-amber-200 font-bold flex items-center gap-1.5 cursor-pointer">
+                    <Upload className="w-4 h-4" />
+                    <span>استيراد واستعادة للحساب</span>
+                    <input
+                      type="file"
+                      accept="application/json,.json"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (!file || !selectedPlayer) return;
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                          onRestoreBackupSnapshot(
+                            String(reader.result ?? ''),
+                            selectedPlayer.accountId
+                          );
+                          setBackupFeedback(`تمت استعادة البيانات من الملف "${file.name}" إلى D1.`);
+                        };
+                        reader.readAsText(file);
+                        e.target.value = '';
+                      }}
+                      className="hidden"
+                    />
+                  </label>
+                )}
               </div>
 
               {backupFeedback && (
@@ -2130,14 +2842,14 @@ export const AdminDashboardView: React.FC<{
             <div className="glass-panel rounded-2xl overflow-hidden">
               <div className="px-4 py-3 border-b border-slate-700/45 flex items-center justify-between">
                 <span className="font-bold text-slate-100">
-                  سجل النسخ الاحتياطية المحفوظة ({backupSnapshots.length})
+                  سجل النسخ الاحتياطية في D1 ({backupSnapshots.length})
                 </span>
                 <span className="text-[11px] text-slate-400">الحد الأقصى 15 نسخة محفوظة</span>
               </div>
 
               {backupSnapshots.length === 0 ? (
                 <div className="p-8 text-center text-slate-400">
-                  لم يتم إنشاء أي نسخة احتياطية بعد. اضغط «إنشاء نسخة احتياطية الآن» لحفظ لقطة فورية للبيانات.
+                  لم يتم إنشاء أي نسخة احتياطية في D1 بعد. اضغط «إنشاء نسخة في D1» لحفظ لقطة فورية.
                 </div>
               ) : (
                 <div className="divide-y divide-slate-800/70">
@@ -2159,17 +2871,30 @@ export const AdminDashboardView: React.FC<{
                       <div className="flex flex-wrap items-center gap-2 shrink-0">
                         <button
                           type="button"
+                          disabled={busyAction}
                           onClick={() => {
-                            onRestoreBackupSnapshot(snap.payloadJson);
-                            setBackupFeedback(`تمت استعادة النسخة الاحتياطية ${snap.id}.`);
+                            let targetId = selectedPlayer?.accountId ?? '';
+                            try {
+                              const parsed = JSON.parse(snap.payloadJson) as { accountId?: string };
+                              if (parsed.accountId) targetId = parsed.accountId;
+                            } catch {
+                              // ignore
+                            }
+                            if (!targetId) {
+                              setBackupFeedback('يرجى اختيار حساب لاعب أولاً للاستعادة.');
+                              return;
+                            }
+                            onRestoreBackupSnapshot(snap.payloadJson, targetId);
+                            setBackupFeedback(`تمت استعادة النسخة الاحتياطية ${snap.id} إلى D1.`);
                           }}
-                          className="min-h-[38px] px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center gap-1"
+                          className="min-h-[38px] px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold flex items-center gap-1"
                         >
                           <RotateCcw className="w-3.5 h-3.5" />
                           <span>استعادة</span>
                         </button>
                         <button
                           type="button"
+                          disabled={busyAction}
                           onClick={() => onDeleteBackupSnapshot(snap.id)}
                           className="min-h-[38px] px-3 py-1.5 rounded-xl bg-rose-950/60 hover:bg-rose-900/70 border border-rose-500/40 text-rose-200 font-bold flex items-center gap-1"
                         >
@@ -2190,11 +2915,24 @@ export const AdminDashboardView: React.FC<{
             onClick={() => setReceiptLightbox(null)}
             className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-4"
           >
-            <img
-              src={receiptLightbox}
-              alt="إيصال التحويل"
-              className="max-h-[82dvh] rounded-xl border border-slate-700"
-            />
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="relative max-w-3xl max-h-[88dvh]"
+            >
+              <button
+                type="button"
+                onClick={() => setReceiptLightbox(null)}
+                aria-label="إغلاق المعاينة"
+                className="absolute -top-3 -left-3 w-9 h-9 rounded-full bg-slate-900 border border-slate-600 text-white flex items-center justify-center shadow-lg hover:bg-slate-800"
+              >
+                <X className="w-4 h-4" />
+              </button>
+              <img
+                src={receiptLightbox}
+                alt="إيصال التحويل"
+                className="max-h-[82dvh] rounded-xl border border-slate-700"
+              />
+            </div>
           </div>
         )}
       </div>

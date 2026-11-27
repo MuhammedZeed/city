@@ -4,7 +4,6 @@ import {
   TICKET_STATUS_LABELS,
 } from "@enginora/shared";
 import {
-  AdminBackupSnapshot,
   AdminConfig,
   AdminRole,
   FinancialCategory,
@@ -21,11 +20,9 @@ import {
   creditResourceStock,
   formatKsaDateTime,
   getTotalGems,
-  saveGameState,
 } from "@enginora/shared";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const ADMIN_BACKUP_STORAGE_KEY = "enginora_founder_backups_v1";
 
 export function adminReviewPaymentOrder(
   state: GameState,
@@ -485,99 +482,84 @@ export function adminReviewPlayerRegistration(
   return { state: next };
 }
 
-export function listAdminBackupSnapshots(role: AdminRole): AdminBackupSnapshot[] {
-  if (role !== 'founder' || typeof window === 'undefined') return [];
-  try {
-    const raw = window.localStorage.getItem(ADMIN_BACKUP_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as AdminBackupSnapshot[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-export function createAdminBackupSnapshot(
+export function buildAdminBackupPayload(
   state: GameState,
   role: AdminRole,
   label: string,
   now: number
-): { snapshot?: AdminBackupSnapshot; list: AdminBackupSnapshot[]; state: GameState; error?: string } {
+): {
+  label: string;
+  createdBy: string;
+  totalSarApproved: number;
+  commanderName: string;
+  payloadJson: string;
+  state: GameState;
+  error?: string;
+} {
   if (role !== 'founder') {
     return {
-      list: [],
+      label: '',
+      createdBy: '',
+      totalSarApproved: 0,
+      commanderName: '',
+      payloadJson: '',
       state,
       error: 'النسخ الاحتياطي للبيانات متاح للمؤسس (Founder) فقط.',
     };
   }
 
   const totalSarApproved = state.financialLogs.reduce(
-    (s, l) => (l.category === 'payment_refund' ? s - Math.abs(l.amountSar) : s + Math.max(0, l.amountSar)),
+    (s, l) =>
+      l.category === 'payment_refund'
+        ? s - Math.abs(l.amountSar)
+        : s + Math.max(0, l.amountSar),
     0
   );
+
+  const resolvedLabel =
+    label.trim() || `نسخة بيانات ${formatKsaDateTime(now)}`;
 
   const nextWithAudit = appendAuditLog(
     state,
     role,
     'إنشاء نسخة احتياطية لبيانات اللعبة',
-    label.trim() || `نسخة تلقائية (${formatKsaDateTime(now)})`,
+    resolvedLabel,
     now
   );
 
-  const snapshot: AdminBackupSnapshot = {
-    id: `BKP-${now}`,
-    label: label.trim() || `نسخة بيانات ${formatKsaDateTime(now)}`,
-    createdAt: now,
+  return {
+    label: resolvedLabel,
     createdBy: 'المؤسس (Founder)',
     totalSarApproved,
     commanderName: nextWithAudit.commanderName,
     payloadJson: JSON.stringify(nextWithAudit),
+    state: nextWithAudit,
   };
-
-  const existing = listAdminBackupSnapshots(role);
-  const updatedList = [snapshot, ...existing].slice(0, 15);
-  if (typeof window !== 'undefined') {
-    try {
-      window.localStorage.setItem(ADMIN_BACKUP_STORAGE_KEY, JSON.stringify(updatedList));
-    } catch {
-      // ignore quota error
-    }
-  }
-
-  return { snapshot, list: updatedList, state: nextWithAudit };
-}
-
-export function deleteAdminBackupSnapshot(
-  snapshotId: string,
-  role: AdminRole
-): AdminBackupSnapshot[] {
-  if (role !== 'founder' || typeof window === 'undefined') return [];
-  const next = listAdminBackupSnapshots(role).filter((b) => b.id !== snapshotId);
-  try {
-    window.localStorage.setItem(ADMIN_BACKUP_STORAGE_KEY, JSON.stringify(next));
-  } catch {
-    // ignore
-  }
-  return next;
 }
 
 export function restoreGameStateFromJson(
   jsonText: string,
   role: AdminRole,
-  now: number
+  now: number,
+  fallbackAccountId?: string
 ): { state?: GameState; error?: string } {
   if (role !== 'founder') {
     return { error: 'استعادة النسخ الاحتياطية حصرية لحساب المؤسس (Founder).' };
   }
   try {
     const parsed = JSON.parse(jsonText) as Partial<GameState>;
-    if (!parsed || (parsed.version !== 2 && parsed.version !== 3) || !Array.isArray(parsed.buildings)) {
+    if (
+      !parsed ||
+      (parsed.version !== 2 && parsed.version !== 3) ||
+      !Array.isArray(parsed.buildings)
+    ) {
       return { error: 'ملف النسخة الاحتياطية غير صالح أو تالف.' };
     }
     const base = createInitialState(parsed.commanderName ?? 'القائد سيف');
     const restored: GameState = {
       ...base,
       ...parsed,
+      accountId: parsed.accountId || fallbackAccountId || base.accountId,
       version: 3,
       adminConfig: parsed.adminConfig
         ? cloneAdminConfig({
@@ -598,7 +580,6 @@ export function restoreGameStateFromJson(
       `تمت استعادة بيانات الحساب (${restored.commanderName})`,
       now
     );
-    saveGameState(audited);
     return { state: audited };
   } catch {
     return { error: 'تعذر قراءة ملف النسخة الاحتياطية بصيغة JSON.' };

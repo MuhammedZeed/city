@@ -14,13 +14,20 @@ function resolvePackageDir(pkgName: string): string {
 
 function collectWorkspaceTextFiles(workspaceRoot: string): Record<string, string> {
   const result: Record<string, string> = {};
-  const textExts = new Set(['.ts', '.tsx', '.css', '.json', '.html', '.md', '.txt', '.example']);
+  const textExts = new Set(['.ts', '.tsx', '.css', '.json', '.jsonc', '.sql', '.toml', '.html', '.md', '.txt', '.example']);
 
   const walk = (absDir: string, relPrefix: string) => {
     if (!fs.existsSync(absDir)) return;
     const entries = fs.readdirSync(absDir, { withFileTypes: true });
     for (const entry of entries) {
-      if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === 'images') {
+      if (
+        entry.name === 'node_modules' ||
+        entry.name === 'dist' ||
+        entry.name === 'images' ||
+        entry.name === '.wrangler' ||
+        entry.name === '.dev.vars' ||
+        entry.name.startsWith('.dev.vars.')
+      ) {
         continue;
       }
       const absEntry = path.join(absDir, entry.name);
@@ -30,7 +37,7 @@ function collectWorkspaceTextFiles(workspaceRoot: string): Record<string, string
       } else if (
         entry.isFile() &&
         (textExts.has(path.extname(entry.name).toLowerCase()) ||
-          entry.name.startsWith('.env') ||
+          entry.name === '.env.example' ||
           entry.name === '.gitignore')
       ) {
         result[relEntry] = fs.readFileSync(absEntry, 'utf8');
@@ -40,6 +47,7 @@ function collectWorkspaceTextFiles(workspaceRoot: string): Record<string, string
 
   walk(path.join(workspaceRoot, 'apps/game'), 'apps/game');
   walk(path.join(workspaceRoot, 'apps/admin'), 'apps/admin');
+  walk(path.join(workspaceRoot, 'apps/api'), 'apps/api');
   walk(path.join(workspaceRoot, 'packages/shared'), 'packages/shared');
   return result;
 }

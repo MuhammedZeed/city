@@ -1,16 +1,33 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Clock, ExternalLink, ShieldCheck } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  Clock,
+  ExternalLink,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Lock,
+  ShieldCheck,
+} from 'lucide-react';
+import {
+  API_ENDPOINTS,
   AdminBackupSnapshot,
+  AdminBackupsResponse,
   AdminConfig,
+  AdminConfigUpdateResponse,
+  AdminLoginResponse,
+  AdminOverviewResponse,
+  AdminPlayerRecord,
+  AdminPlayerStateUpdateResponse,
+  AdminResetPasswordResponse,
   AdminRole,
-  GameState,
+  ApiClientError,
+  DEFAULT_ADMIN_CONFIG,
   TicketAttachment,
   TicketStatus,
+  apiRequest,
+  cloneAdminConfig,
   formatKsaTime,
-  loadSavedState,
   replyToSupportTicket,
-  saveGameState,
 } from '@enginora/shared';
 import { AdminDashboardView } from './components/AdminDashboardView';
 import {
@@ -18,9 +35,7 @@ import {
   adminReviewPaymentOrder,
   adminReviewPlayerRegistration,
   adminToggleMarketFreeze,
-  createAdminBackupSnapshot,
-  deleteAdminBackupSnapshot,
-  listAdminBackupSnapshots,
+  buildAdminBackupPayload,
   restoreGameStateFromJson,
   updateAdminConfig,
   updateSupportTicketStatus,
@@ -32,20 +47,49 @@ interface ToastMessage {
   tone: 'info' | 'success' | 'error';
 }
 
-const GAME_APP_URL = import.meta.env.VITE_GAME_APP_URL || '';
+const GAME_APP_URL =
+  import.meta.env.VITE_GAME_APP_URL || 'https://enginora-city-game.pages.dev';
+
+const ROLE_OPTIONS: { id: AdminRole; title: string; subtitle: string }[] = [
+  {
+    id: 'founder',
+    title: 'المؤسس (Founder)',
+    subtitle: 'صلاحية كاملة: السيرفرات، المدفوعات، الأسعار، كلمات المرور، والنسخ الاحتياطي',
+  },
+  {
+    id: 'partner',
+    title: 'الشريك (Partner)',
+    subtitle: 'اطلاع للقراءة فقط على التقارير المالية والمدفوعات واللاعبين',
+  },
+  {
+    id: 'support',
+    title: 'الدعم الفني (Support)',
+    subtitle: 'إدارة والرد على تذاكر اللاعبين فقط دون الوصول للبيانات المالية',
+  },
+];
 
 export default function App() {
-  const [state, setState] = useState<GameState>(() => loadSavedState());
-  const [now, setNow] = useState<number>(() => Date.now());
+  const [adminToken, setAdminToken] = useState<string | null>(null);
   const [adminRole, setAdminRole] = useState<AdminRole>('founder');
-  const [backupSnapshots, setBackupSnapshots] = useState<AdminBackupSnapshot[]>(
-    () => listAdminBackupSnapshots('founder')
+  const [adminConfig, setAdminConfig] = useState<AdminConfig>(() =>
+    cloneAdminConfig(DEFAULT_ADMIN_CONFIG)
   );
+  const [players, setPlayers] = useState<AdminPlayerRecord[]>([]);
+  const [selectedPlayerId, setSelectedPlayerId] = useState<string>('');
+  const [backupSnapshots, setBackupSnapshots] = useState<AdminBackupSnapshot[]>([]);
+  const [now, setNow] = useState<number>(() => Date.now());
   const [toast, setToast] = useState<ToastMessage | null>(null);
+  const [busyAction, setBusyAction] = useState(false);
 
-  useEffect(() => {
-    setBackupSnapshots(listAdminBackupSnapshots(adminRole));
-  }, [adminRole]);
+  // Login gate state
+  const [loginRole, setLoginRole] = useState<AdminRole>('founder');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+
+  const tokenRef = useRef<string | null>(null);
+  tokenRef.current = adminToken;
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -54,115 +98,342 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, []);
 
-  useEffect(() => {
-    saveGameState(state);
-  }, [state]);
-
   const pushToast = useCallback(
     (text: string, tone: ToastMessage['tone'] = 'info') => {
       const id = Date.now();
       setToast({ id, text, tone });
       window.setTimeout(() => {
         setToast((curr) => (curr && curr.id === id ? null : curr));
-      }, 3600);
+      }, 3800);
     },
     []
   );
 
+  const handleUnauthorized = useCallback(
+    (msg?: string) => {
+      tokenRef.current = null;
+      setAdminToken(null);
+      setPlayers([]);
+      setBackupSnapshots([]);
+      setLoginPassword('');
+      setLoginError(msg || 'انتهت الجلسة الإدارية. يرجى تسجيل الدخول مرة أخرى.');
+    },
+    []
+  );
+
+  const fetchOverview = useCallback(
+    async (explicitToken?: string, silent = false) => {
+      const token = explicitToken ?? tokenRef.current;
+      if (!token) return;
+      if (!silent) setBusyAction(true);
+      try {
+        const res = await apiRequest<AdminOverviewResponse>(API_ENDPOINTS.adminOverview, {
+          token,
+        });
+        setAdminRole(res.role);
+        setAdminConfig(res.adminConfig);
+        setPlayers(res.players);
+        setSelectedPlayerId((prev) => {
+          if (prev && res.players.some((p) => p.accountId === prev)) return prev;
+          return res.players[0]?.accountId ?? '';
+        });
+        setBackupSnapshots(Array.isArray(res.backups) ? res.backups : []);
+      } catch (err) {
+        if (err instanceof ApiClientError && err.status === 401) {
+          handleUnauthorized(err.message);
+        } else if (!silent) {
+          pushToast(
+            err instanceof Error ? err.message : 'تعذر تحميل بيانات لوحة الإدارة من الخادم.',
+            'error'
+          );
+        }
+      } finally {
+        if (!silent) setBusyAction(false);
+      }
+    },
+    [handleUnauthorized, pushToast]
+  );
+
+  // Periodic background refresh from D1 every 15s while authenticated
+  useEffect(() => {
+    if (!adminToken) return;
+    const timer = window.setInterval(() => {
+      void fetchOverview(undefined, true);
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [adminToken, fetchOverview]);
+
+  const handleAdminLoginSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError(null);
+    if (!loginPassword) {
+      setLoginError('يرجى إدخال كلمة المرور الإدارية.');
+      return;
+    }
+
+    setLoginLoading(true);
+    try {
+      const res = await apiRequest<AdminLoginResponse>(API_ENDPOINTS.adminLogin, {
+        method: 'POST',
+        body: {
+          password: loginPassword,
+          role: loginRole,
+        },
+      });
+      tokenRef.current = res.token;
+      setAdminToken(res.token);
+      setAdminRole(res.role);
+      setLoginPassword('');
+      await fetchOverview(res.token, false);
+      pushToast('تم فتح الجلسة الإدارية والاتصال بقاعدة D1 بنجاح.', 'success');
+    } catch (err) {
+      setLoginError(
+        err instanceof Error ? err.message : 'تعذر التحقق من كلمة المرور الإدارية.'
+      );
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLogout = useCallback(async () => {
+    const token = tokenRef.current;
+    tokenRef.current = null;
+    setAdminToken(null);
+    setPlayers([]);
+    setBackupSnapshots([]);
+    setSelectedPlayerId('');
+    setLoginPassword('');
+    setLoginError(null);
+    if (token) {
+      try {
+        await apiRequest(API_ENDPOINTS.adminLogout, {
+          method: 'POST',
+          token,
+        });
+      } catch {
+        // Ignore network errors during logout
+      }
+    }
+    pushToast('تم تسجيل الخروج من لوحة الإدارة.', 'info');
+  }, [pushToast]);
+
+  const persistPlayerMutation = useCallback(
+    async (
+      accountId: string,
+      mutator: (player: AdminPlayerRecord) => {
+        state: AdminPlayerRecord['state'];
+        error?: string;
+      },
+      successMessage: string
+    ): Promise<boolean> => {
+      const token = tokenRef.current;
+      if (!token) {
+        handleUnauthorized();
+        return false;
+      }
+
+      const target = players.find((p) => p.accountId === accountId);
+      if (!target) {
+        pushToast('الحساب المستهدف غير موجود في القائمة الحالية.', 'error');
+        return false;
+      }
+
+      const mutation = mutator(target);
+      if (mutation.error) {
+        pushToast(mutation.error, 'error');
+        return false;
+      }
+
+      setBusyAction(true);
+      try {
+        const res = await apiRequest<AdminPlayerStateUpdateResponse>(
+          API_ENDPOINTS.adminPlayerState(accountId),
+          {
+            method: 'POST',
+            token,
+            body: { state: mutation.state },
+          }
+        );
+
+        setAdminConfig(res.adminConfig);
+        setPlayers((prev) =>
+          prev.map((p) =>
+            p.accountId === accountId
+              ? {
+                  ...p,
+                  commanderName: res.state.commanderName,
+                  registrationStatus: res.state.registration?.status ?? p.registrationStatus,
+                  selectedServerId: res.state.selectedServerId ?? p.selectedServerId,
+                  revision: res.revision,
+                  updatedAt: res.serverTimeUtc,
+                  state: res.state,
+                }
+              : p
+          )
+        );
+        pushToast(successMessage, 'success');
+        return true;
+      } catch (err) {
+        if (err instanceof ApiClientError && err.status === 401) {
+          handleUnauthorized(err.message);
+        } else {
+          pushToast(
+            err instanceof Error ? err.message : 'تعذر حفظ التعديل في Cloudflare D1.',
+            'error'
+          );
+        }
+        return false;
+      } finally {
+        setBusyAction(false);
+      }
+    },
+    [players, handleUnauthorized, pushToast]
+  );
+
   const handleAdminReviewPaymentOrder = (
+    accountId: string,
     orderId: string,
     decision: 'approve' | 'reject' | 'refund',
     note: string
   ) => {
-    const res = adminReviewPaymentOrder(
-      state,
-      orderId,
-      decision,
-      adminRole,
-      note,
-      Date.now()
+    void persistPlayerMutation(
+      accountId,
+      (player) =>
+        adminReviewPaymentOrder(
+          player.state,
+          orderId,
+          decision,
+          adminRole,
+          note,
+          Date.now()
+        ),
+      'تم تنفيذ قرار المراجعة وحفظه في السجل المالي بقاعدة D1.'
     );
-    if (res.error) {
-      pushToast(res.error, 'error');
-      return;
-    }
-    setState(res.state);
-    pushToast('تم تنفيذ قرار المراجعة وتقييده في السجل المالي.', 'success');
   };
 
   const handleAdminReviewRegistration = (
+    accountId: string,
     decision: 'approve' | 'reject',
     note: string
   ) => {
-    const res = adminReviewPlayerRegistration(
-      state,
-      decision,
-      adminRole,
-      note,
-      Date.now()
-    );
-    if (res.error) {
-      pushToast(res.error, 'error');
-      return;
-    }
-    setState(res.state);
-    pushToast(
+    void persistPlayerMutation(
+      accountId,
+      (player) =>
+        adminReviewPlayerRegistration(
+          player.state,
+          decision,
+          adminRole,
+          note,
+          Date.now()
+        ),
       decision === 'approve'
-        ? 'تم اعتماد تسجيل اللاعب وفاتورة التفعيل بنجاح.'
-        : 'تم رفض طلب التسجيل وتحديث حالته.',
-      decision === 'approve' ? 'success' : 'info'
+        ? 'تم اعتماد تسجيل اللاعب وفاتورة التفعيل في D1 بنجاح.'
+        : 'تم رفض طلب التسجيل وتحديث حالته في D1.'
     );
   };
 
-  const handleAdminReverseMarketOffer = (offerId: string, reason: string) => {
-    const res = adminReverseMarketOfferOrTrade(
-      state,
-      offerId,
-      adminRole,
-      reason,
-      Date.now()
-    );
-    if (res.error) {
-      pushToast(res.error, 'error');
-      return;
-    }
-    setState(res.state);
-    pushToast('تم إلغاء وعكس العرض لحماية نزاهة السوق.', 'success');
-  };
-
-  const handleAdminToggleMarketFreeze = (freeze: boolean, reason: string) => {
-    const res = adminToggleMarketFreeze(
-      state,
-      freeze,
-      adminRole,
-      reason,
-      Date.now()
-    );
-    if (res.error) {
-      pushToast(res.error, 'error');
-      return;
-    }
-    setState(res.state);
-    pushToast(
-      freeze ? 'تم تجميد تداول الحساب مؤقتًا.' : 'تم فك تجميد الحساب في السوق.',
-      'info'
+  const handleAdminReverseMarketOffer = (
+    accountId: string,
+    offerId: string,
+    reason: string
+  ) => {
+    void persistPlayerMutation(
+      accountId,
+      (player) =>
+        adminReverseMarketOfferOrTrade(
+          player.state,
+          offerId,
+          adminRole,
+          reason,
+          Date.now()
+        ),
+      'تم إلغاء وعكس العرض لحماية نزاهة السوق.'
     );
   };
 
-  const handleUpdateAdminConfig = (
+  const handleAdminToggleMarketFreeze = (
+    accountId: string,
+    freeze: boolean,
+    reason: string
+  ) => {
+    void persistPlayerMutation(
+      accountId,
+      (player) =>
+        adminToggleMarketFreeze(
+          player.state,
+          freeze,
+          adminRole,
+          reason,
+          Date.now()
+        ),
+      freeze ? 'تم تجميد تداول الحساب مؤقتًا في D1.' : 'تم فك تجميد الحساب في السوق.'
+    );
+  };
+
+  const handleUpdateAdminConfig = async (
     patch: Partial<AdminConfig>,
     summary: string
   ) => {
-    const res = updateAdminConfig(state, patch, adminRole, summary, Date.now());
-    if (res.error) {
-      pushToast(res.error, 'error');
+    const token = tokenRef.current;
+    if (!token) {
+      handleUnauthorized();
       return;
     }
-    setState(res.state);
-    pushToast('تم حفظ الإعدادات وتسجيل التعديل في سجل التدقيق.', 'success');
+
+    const baseState = players[0]?.state;
+    if (baseState) {
+      const check = updateAdminConfig(
+        { ...baseState, adminConfig },
+        patch,
+        adminRole,
+        summary,
+        Date.now()
+      );
+      if (check.error) {
+        pushToast(check.error, 'error');
+        return;
+      }
+    } else if (adminRole !== 'founder') {
+      pushToast('تعديل الأسعار أو السيرفرات أو الإعدادات العامة حصري للمؤسس.', 'error');
+      return;
+    }
+
+    const nextConfig: AdminConfig = {
+      ...adminConfig,
+      ...patch,
+    };
+
+    setBusyAction(true);
+    try {
+      const res = await apiRequest<AdminConfigUpdateResponse>(API_ENDPOINTS.adminConfig, {
+        method: 'PUT',
+        token,
+        body: { adminConfig: nextConfig },
+      });
+      setAdminConfig(res.adminConfig);
+      setPlayers((prev) =>
+        prev.map((p) => ({
+          ...p,
+          state: { ...p.state, adminConfig: res.adminConfig },
+        }))
+      );
+      pushToast('تم حفظ الإعدادات وتحديث جميع السيرفرات والأسعار في D1.', 'success');
+    } catch (err) {
+      if (err instanceof ApiClientError && err.status === 401) {
+        handleUnauthorized(err.message);
+      } else {
+        pushToast(
+          err instanceof Error ? err.message : 'تعذر حفظ الإعدادات العامة في الخادم.',
+          'error'
+        );
+      }
+    } finally {
+      setBusyAction(false);
+    }
   };
 
   const handleAdminReplyTicket = (
+    accountId: string,
     ticketId: string,
     text: string,
     attachments: TicketAttachment[]
@@ -171,70 +442,188 @@ export default function App() {
       pushToast('الرد على تذاكر الدعم متاح للمؤسس أو فريق الدعم فقط.', 'error');
       return;
     }
-    const res = replyToSupportTicket(
-      state,
-      ticketId,
-      'support',
-      text,
-      attachments,
-      Date.now()
+    void persistPlayerMutation(
+      accountId,
+      (player) =>
+        replyToSupportTicket(
+          player.state,
+          ticketId,
+          'support',
+          text,
+          attachments,
+          Date.now()
+        ),
+      'تم إرسال رد الدعم الفني وحفظه في D1.'
     );
-    if (res.error) {
-      pushToast(res.error, 'error');
-      return;
-    }
-    setState(res.state);
-    pushToast('تم إرسال رد الدعم الفني للاعب.', 'success');
   };
 
   const handleAdminUpdateTicketStatus = (
+    accountId: string,
     ticketId: string,
     status: TicketStatus
   ) => {
-    const res = updateSupportTicketStatus(
-      state,
-      ticketId,
-      status,
+    void persistPlayerMutation(
+      accountId,
+      (player) =>
+        updateSupportTicketStatus(
+          player.state,
+          ticketId,
+          status,
+          adminRole,
+          Date.now()
+        ),
+      'تم تحديث حالة التذكرة في D1.'
+    );
+  };
+
+  const handleResetPlayerPassword = async (
+    accountId: string,
+    newPassword: string
+  ): Promise<{ error?: string }> => {
+    const token = tokenRef.current;
+    if (!token) {
+      handleUnauthorized();
+      return { error: 'انتهت الجلسة الإدارية.' };
+    }
+    setBusyAction(true);
+    try {
+      const res = await apiRequest<AdminResetPasswordResponse>(
+        API_ENDPOINTS.adminPlayerPassword(accountId),
+        {
+          method: 'POST',
+          token,
+          body: { newPassword },
+        }
+      );
+      pushToast(res.message || 'تم تحديث كلمة مرور اللاعب في D1.', 'success');
+      return {};
+    } catch (err) {
+      if (err instanceof ApiClientError && err.status === 401) {
+        handleUnauthorized(err.message);
+      }
+      const message =
+        err instanceof Error ? err.message : 'تعذر تحديث كلمة مرور اللاعب.';
+      pushToast(message, 'error');
+      return { error: message };
+    } finally {
+      setBusyAction(false);
+    }
+  };
+
+  const handleCreateBackupSnapshot = async (
+    label: string,
+    targetAccountId: string
+  ) => {
+    const token = tokenRef.current;
+    if (!token) {
+      handleUnauthorized();
+      return;
+    }
+    const target = players.find((p) => p.accountId === targetAccountId);
+    if (!target) {
+      pushToast('يرجى اختيار حساب لاعب أولاً.', 'error');
+      return;
+    }
+
+    const payload = buildAdminBackupPayload(
+      target.state,
       adminRole,
+      label,
       Date.now()
     );
-    if (res.error) {
-      pushToast(res.error, 'error');
+    if (payload.error) {
+      pushToast(payload.error, 'error');
       return;
     }
-    setState(res.state);
-    pushToast('تم تحديث حالة التذكرة.', 'success');
-  };
 
-  const handleCreateBackupSnapshot = (label: string) => {
-    const res = createAdminBackupSnapshot(state, adminRole, label, Date.now());
-    if (res.error) {
-      pushToast(res.error, 'error');
-      return;
+    setBusyAction(true);
+    try {
+      const res = await apiRequest<AdminBackupsResponse>(API_ENDPOINTS.adminBackups, {
+        method: 'POST',
+        token,
+        body: {
+          label: payload.label,
+          createdBy: payload.createdBy,
+          totalSarApproved: payload.totalSarApproved,
+          commanderName: payload.commanderName,
+          payloadJson: payload.payloadJson,
+        },
+      });
+      setBackupSnapshots(res.backups);
+      pushToast('تم إنشاء النسخة الاحتياطية وحفظها في قاعدة D1 بنجاح.', 'success');
+    } catch (err) {
+      if (err instanceof ApiClientError && err.status === 401) {
+        handleUnauthorized(err.message);
+      } else {
+        pushToast(
+          err instanceof Error ? err.message : 'تعذر حفظ النسخة الاحتياطية في D1.',
+          'error'
+        );
+      }
+    } finally {
+      setBusyAction(false);
     }
-    setState(res.state);
-    setBackupSnapshots(res.list);
-    pushToast('تم إنشاء نسخة احتياطية لبيانات اللعبة بنجاح.', 'success');
   };
 
-  const handleRestoreBackupSnapshot = (payloadJson: string) => {
-    const res = restoreGameStateFromJson(payloadJson, adminRole, Date.now());
+  const handleRestoreBackupSnapshot = (
+    payloadJson: string,
+    targetAccountId: string
+  ) => {
+    const res = restoreGameStateFromJson(
+      payloadJson,
+      adminRole,
+      Date.now(),
+      targetAccountId
+    );
     if (res.error || !res.state) {
       pushToast(res.error ?? 'تعذر استعادة النسخة الاحتياطية.', 'error');
       return;
     }
-    setState(res.state);
-    pushToast('تمت استعادة بيانات اللعبة من النسخة الاحتياطية بنجاح.', 'success');
+    const restoredState = res.state;
+    const effectiveAccountId =
+      players.find((p) => p.accountId === restoredState.accountId)?.accountId ??
+      targetAccountId;
+
+    void persistPlayerMutation(
+      effectiveAccountId,
+      () => ({ state: restoredState }),
+      'تمت استعادة بيانات الحساب من النسخة الاحتياطية وحفظها في D1.'
+    );
   };
 
-  const handleDeleteBackupSnapshot = (snapshotId: string) => {
+  const handleDeleteBackupSnapshot = async (snapshotId: string) => {
     if (adminRole !== 'founder') {
       pushToast('حذف النسخ الاحتياطية حصري للمؤسس فقط.', 'error');
       return;
     }
-    const updated = deleteAdminBackupSnapshot(snapshotId, adminRole);
-    setBackupSnapshots(updated);
-    pushToast('تم حذف النسخة الاحتياطية من السجل المحلي.', 'info');
+    const token = tokenRef.current;
+    if (!token) {
+      handleUnauthorized();
+      return;
+    }
+    setBusyAction(true);
+    try {
+      const res = await apiRequest<AdminBackupsResponse>(
+        API_ENDPOINTS.adminBackupDelete(snapshotId),
+        {
+          method: 'DELETE',
+          token,
+        }
+      );
+      setBackupSnapshots(res.backups);
+      pushToast('تم حذف النسخة الاحتياطية من قاعدة D1.', 'info');
+    } catch (err) {
+      if (err instanceof ApiClientError && err.status === 401) {
+        handleUnauthorized(err.message);
+      } else {
+        pushToast(
+          err instanceof Error ? err.message : 'تعذر حذف النسخة الاحتياطية.',
+          'error'
+        );
+      }
+    } finally {
+      setBusyAction(false);
+    }
   };
 
   return (
@@ -246,10 +635,10 @@ export default function App() {
           </div>
           <div>
             <div className="text-sm sm:text-base font-bold text-amber-300">
-              ENGINORA CITY ADMIN — لوحة الإدارة المستقلة
+              ENGINORA CITY ADMIN — لوحة الإدارة السحابية (D1)
             </div>
             <div className="text-[11px] text-slate-400">
-              تطبيق مستقل لإدارة المنصة (المرحلة 1: فصل كامل · سيتم ربط الخادم و D1 في المرحلة 2)
+              إدارة متصلة مباشرة مع Cloudflare Workers وقاعدة بيانات Cloudflare D1
             </div>
           </div>
         </div>
@@ -275,23 +664,126 @@ export default function App() {
       </header>
 
       <main className="flex-1 min-h-0 overflow-hidden relative">
-        <AdminDashboardView
-          state={state}
-          now={now}
-          adminRole={adminRole}
-          backupSnapshots={backupSnapshots}
-          onChangeAdminRole={setAdminRole}
-          onReviewPaymentOrder={handleAdminReviewPaymentOrder}
-          onReviewRegistration={handleAdminReviewRegistration}
-          onCreateBackupSnapshot={handleCreateBackupSnapshot}
-          onRestoreBackupSnapshot={handleRestoreBackupSnapshot}
-          onDeleteBackupSnapshot={handleDeleteBackupSnapshot}
-          onReverseMarketOffer={handleAdminReverseMarketOffer}
-          onToggleMarketFreeze={handleAdminToggleMarketFreeze}
-          onUpdateAdminConfig={handleUpdateAdminConfig}
-          onReplySupportTicket={handleAdminReplyTicket}
-          onUpdateTicketStatus={handleAdminUpdateTicketStatus}
-        />
+        {!adminToken ? (
+          <div className="h-full overflow-y-auto flex items-center justify-center p-4 bg-[#070D1B] bg-[radial-gradient(ellipse_at_top_right,rgba(245,158,11,0.12),transparent_48%),radial-gradient(ellipse_at_bottom_left,rgba(16,185,129,0.10),transparent_45%)]">
+            <form
+              onSubmit={handleAdminLoginSubmit}
+              className="w-full max-w-md glass-panel p-6 rounded-2xl border border-amber-500/40 space-y-5 text-xs shadow-2xl"
+            >
+              <div className="flex items-center gap-3 pb-3 border-b border-slate-800">
+                <div className="w-11 h-11 rounded-2xl bg-amber-500/15 border border-amber-400/50 flex items-center justify-center shrink-0">
+                  <Lock className="w-5 h-5 text-amber-300" />
+                </div>
+                <div>
+                  <h1 className="text-base font-bold text-amber-300">
+                    بوابة الدخول الإداري الموثقة
+                  </h1>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    اختر الدور الوظيفي وأدخل كلمة المرور الإدارية للوصول إلى قاعدة D1
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block font-bold text-slate-200">
+                  الصلاحية المطلوبة
+                </label>
+                <div className="space-y-2">
+                  {ROLE_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setLoginRole(opt.id)}
+                      className={`w-full text-right p-3 rounded-xl border transition-colors ${
+                        loginRole === opt.id
+                          ? 'bg-amber-500/15 border-amber-400 text-amber-200'
+                          : 'bg-slate-950/75 border-slate-800 text-slate-300 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="font-bold text-xs">{opt.title}</div>
+                      <div className="text-[11px] text-slate-400 mt-0.5">{opt.subtitle}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block font-bold text-slate-200">
+                  كلمة المرور الإدارية (ADMIN_PASSWORD)
+                </label>
+                <div className="relative">
+                  <KeyRound className="w-4 h-4 text-amber-400 absolute right-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type={showLoginPassword ? 'text' : 'password'}
+                    required
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    placeholder="أدخل كلمة المرور الإدارية..."
+                    className="w-full min-h-[44px] pr-9 pl-10 py-2 rounded-xl bg-slate-950/90 border border-slate-700 text-slate-100"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowLoginPassword((v) => !v)}
+                    className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200"
+                    title={showLoginPassword ? 'إخفاء' : 'إظهار'}
+                  >
+                    {showLoginPassword ? (
+                      <EyeOff className="w-4 h-4" />
+                    ) : (
+                      <Eye className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {loginError && (
+                <div className="p-3 rounded-xl bg-rose-950/70 border border-rose-500/50 text-rose-200 font-semibold">
+                  {loginError}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={loginLoading}
+                className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 font-bold text-sm shadow-lg transition-colors"
+              >
+                {loginLoading ? 'جارٍ التحقق وفتح الجلسة...' : 'دخول إلى لوحة الإدارة'}
+              </button>
+            </form>
+          </div>
+        ) : (
+          <AdminDashboardView
+            adminToken={adminToken}
+            adminConfig={adminConfig}
+            players={players}
+            selectedPlayerId={selectedPlayerId}
+            onSelectPlayer={setSelectedPlayerId}
+            now={now}
+            adminRole={adminRole}
+            backupSnapshots={backupSnapshots}
+            busyAction={busyAction}
+            onLogout={handleLogout}
+            onRefreshOverview={() => void fetchOverview(undefined, false)}
+            onReviewPaymentOrder={handleAdminReviewPaymentOrder}
+            onReviewRegistration={handleAdminReviewRegistration}
+            onResetPlayerPassword={handleResetPlayerPassword}
+            onCreateBackupSnapshot={handleCreateBackupSnapshot}
+            onRestoreBackupSnapshot={handleRestoreBackupSnapshot}
+            onDeleteBackupSnapshot={handleDeleteBackupSnapshot}
+            onReverseMarketOffer={handleAdminReverseMarketOffer}
+            onToggleMarketFreeze={handleAdminToggleMarketFreeze}
+            onUpdateAdminConfig={handleUpdateAdminConfig}
+            onReplySupportTicket={handleAdminReplyTicket}
+            onUpdateTicketStatus={handleAdminUpdateTicketStatus}
+            onEnterGameAsAdmin={
+              GAME_APP_URL
+                ? () => {
+                    window.open(GAME_APP_URL, '_blank', 'noopener,noreferrer');
+                  }
+                : undefined
+            }
+          />
+        )}
 
         {toast && (
           <div
