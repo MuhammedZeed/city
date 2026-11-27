@@ -835,6 +835,7 @@ export const SettingsModal: React.FC<{
   onUpdateProfile: (commanderName: string, cityName: string) => void;
   onToggleSound: () => void;
   onResetCity: () => void;
+  onLogout?: () => void;
   onGenerateTelegramCode?: () => void;
   onLinkTelegram?: (username: string) => void;
   onUnlinkTelegram?: () => void;
@@ -846,6 +847,7 @@ export const SettingsModal: React.FC<{
   onUpdateProfile,
   onToggleSound,
   onResetCity,
+  onLogout,
   onGenerateTelegramCode,
   onLinkTelegram,
   onUnlinkTelegram,
@@ -1057,6 +1059,16 @@ export const SettingsModal: React.FC<{
                 <span>سياسة الخصوصية والشروط</span>
               </button>
             </div>
+
+            {onLogout && (
+              <button
+                type="button"
+                onClick={onLogout}
+                className="min-h-[42px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-semibold"
+              >
+                <span>تسجيل الخروج</span>
+              </button>
+            )}
 
             {!confirmReset ? (
               <button
