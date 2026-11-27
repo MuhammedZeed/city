@@ -40,7 +40,17 @@ const API_VERSION = 2;
 const PROJECT_NAME = 'ENGINORA CITY';
 function emailVerificationEnabled(env: Env): boolean {
   return Boolean(env.RESEND_API_KEY?.trim() && env.EMAIL_FROM?.trim());
+}let receiptsTableReady = false;
+async function ensureReceiptsTable(db: D1Database): Promise<void> {
+  if (receiptsTableReady) return;
+  await db
+    .prepare(
+      'CREATE TABLE IF NOT EXISTS receipts (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, mime TEXT NOT NULL, data_base64 TEXT NOT NULL, created_at INTEGER NOT NULL)'
+    )
+    .run();
+  receiptsTableReady = true;
 }
+
 
 function parseAllowedOrigins(raw?: string): Set<string> {
   const origins = new Set<string>();
@@ -1004,6 +1014,130 @@ export default {
         );
       }
 
+     // Payment receipts stored as real images (/api/receipts)
+      if (path === '/api/receipts' || path.startsWith('/api/receipts/')) {
+        const rToken = extractBearerToken(request);
+        const rSession = rToken
+          ? await resolveSessionByToken(env.DB, rToken, now)
+          : null;
+        if (!rSession) {
+          return jsonResponse(
+            { ok: false, error: 'يلزم تسجيل الدخول.' },
+            401,
+            corsHeaders
+          );
+        }
+        await ensureReceiptsTable(env.DB);
+
+        if (path === '/api/receipts') {
+          if (request.method !== 'POST') {
+            return jsonResponse(
+              { ok: false, error: 'Method Not Allowed' },
+              405,
+              corsHeaders,
+              { Allow: 'POST, OPTIONS' }
+            );
+          }
+          if (rSession.subjectType !== 'player' || !rSession.accountId) {
+            return jsonResponse(
+              { ok: false, error: 'رفع الفواتير متاح للاعبين فقط.' },
+              403,
+              corsHeaders
+            );
+          }
+          const rBody = await readJsonBody(request);
+          const rId = typeof rBody?.id === 'string' ? rBody.id : '';
+          const rDataUrl = typeof rBody?.dataUrl === 'string' ? rBody.dataUrl : '';
+          const rMatch = rDataUrl.match(
+            /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/]+={0,2})$/
+          );
+          if (!/^rcp-[a-f0-9]{16}$/.test(rId) || !rMatch) {
+            return jsonResponse(
+              { ok: false, error: 'صورة الفاتورة غير صالحة.' },
+              400,
+              corsHeaders
+            );
+          }
+          if (rMatch[2].length > 600000) {
+            return jsonResponse(
+              { ok: false, error: 'صورة الفاتورة كبيرة جدًا.' },
+              413,
+              corsHeaders
+            );
+          }
+          const rExisting = await env.DB
+            .prepare('SELECT account_id FROM receipts WHERE id = ?')
+            .bind(rId)
+            .first<{ account_id: string }>();
+          if (rExisting && rExisting.account_id !== rSession.accountId) {
+            return jsonResponse(
+              { ok: false, error: 'معرّف الفاتورة مستخدم.' },
+              409,
+              corsHeaders
+            );
+          }
+          if (!rExisting) {
+            const rCount = await env.DB
+              .prepare('SELECT COUNT(*) AS c FROM receipts WHERE account_id = ?')
+              .bind(rSession.accountId)
+              .first<{ c: number }>();
+            if ((rCount?.c ?? 0) >= 30) {
+              return jsonResponse(
+                { ok: false, error: 'تم الوصول إلى الحد الأقصى لعدد الفواتير.' },
+                429,
+                corsHeaders
+              );
+            }
+          }
+          await env.DB
+            .prepare(
+              'INSERT OR REPLACE INTO receipts (id, account_id, mime, data_base64, created_at) VALUES (?, ?, ?, ?, ?)'
+            )
+            .bind(rId, rSession.accountId, rMatch[1], rMatch[2], now)
+            .run();
+          return jsonResponse({ ok: true, id: rId }, 200, corsHeaders);
+        }
+
+        const receiptId = decodeURIComponent(path.slice('/api/receipts/'.length));
+        if (request.method !== 'GET') {
+          return jsonResponse(
+            { ok: false, error: 'Method Not Allowed' },
+            405,
+            corsHeaders,
+            { Allow: 'GET, OPTIONS' }
+          );
+        }
+        const rRow = await env.DB
+          .prepare('SELECT account_id, mime, data_base64 FROM receipts WHERE id = ?')
+          .bind(receiptId)
+          .first<{ account_id: string; mime: string; data_base64: string }>();
+        if (!rRow) {
+          return jsonResponse(
+            { ok: false, error: 'الفاتورة غير موجودة.' },
+            404,
+            corsHeaders
+          );
+        }
+        if (rSession.subjectType === 'player' && rSession.accountId !== rRow.account_id) {
+          return jsonResponse(
+            { ok: false, error: 'غير مصرح.' },
+            403,
+            corsHeaders
+          );
+        }
+        const rBinary = atob(rRow.data_base64);
+        const rBytes = new Uint8Array(rBinary.length);
+        for (let i = 0; i < rBinary.length; i++) rBytes[i] = rBinary.charCodeAt(i);
+        return new Response(rBytes, {
+          status: 200,
+          headers: {
+            'Content-Type': rRow.mime,
+            'Cache-Control': 'private, max-age=3600',
+            'X-Content-Type-Options': 'nosniff',
+            ...corsHeaders,
+          },
+        });
+      }
       // Authenticated Player Game Routes (/api/game/*)
       if (
         path === '/api/game/state' ||
@@ -1369,6 +1503,55 @@ export default {
           );
         }
 
+     const pwMatch = path.match(/^\/api\/admin\/players\/([^/]+)\/password$/);
+        if (pwMatch) {
+          if (request.method !== 'POST') {
+            return jsonResponse(
+              { ok: false, error: 'Method Not Allowed' },
+              405,
+              corsHeaders,
+              { Allow: 'POST, OPTIONS' }
+            );
+          }
+          if ((session.adminRole ?? 'founder') !== 'founder') {
+            return jsonResponse(
+              { ok: false, error: 'تعيين كلمات المرور حصري للمؤسس.' },
+              403,
+              corsHeaders
+            );
+          }
+          const pwTargetId = decodeURIComponent(pwMatch[1]);
+          const pwBody = await readJsonBody(request);
+          const pwNew = typeof pwBody?.newPassword === 'string' ? pwBody.newPassword : '';
+          const pwCheck2 = validatePassword(pwNew);
+          if (!pwCheck2.valid) {
+            return jsonResponse(
+              { ok: false, error: pwCheck2.error },
+              400,
+              corsHeaders
+            );
+          }
+          const pwTarget = await findPlayerById(env.DB, pwTargetId);
+          if (!pwTarget) {
+            return jsonResponse(
+              { ok: false, error: 'اللاعب غير موجود.' },
+              404,
+              corsHeaders
+            );
+          }
+          const pwHashed = await hashPassword(pwNew);
+          await env.DB.batch([
+            env.DB.prepare(
+              'UPDATE players SET password_hash = ?, password_salt = ?, updated_at = ? WHERE account_id = ?'
+            ).bind(pwHashed.hashHex, pwHashed.saltHex, now, pwTargetId),
+            env.DB.prepare('DELETE FROM sessions WHERE account_id = ?').bind(pwTargetId),
+          ]);
+          return jsonResponse(
+            { ok: true, accountId: pwTargetId, message: 'تم تعيين كلمة المرور الجديدة.' },
+            200,
+            corsHeaders
+          );
+        }
         const playerMatch = path.match(/^\/api\/admin\/players\/([^/]+)\/state$/);
         if (playerMatch) {
           if (request.method !== 'POST' && request.method !== 'PUT') {
