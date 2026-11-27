@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ShieldAlert,
@@ -81,6 +81,20 @@ import {
 } from '@enginora/shared';
 import { soundFx } from './engine/soundFx';
 import {
+  apiGetState,
+  apiLogin,
+  apiLogout,
+  apiRegister,
+  apiResetCity,
+  apiSaveStatePrepared,
+  ensureReceiptUploaded,
+  getStoredToken,
+  hydrateServerState,
+  mergeAuthoritative,
+  newReceiptId,
+  storeToken,
+} from './api/client';
+import {
   BotConfig,
   BuildingType,
   GameState,
@@ -114,9 +128,13 @@ export default function App() {
   const [showBotModal, setShowBotModal] = useState(false);
   const [botModalTab, setBotModalTab] = useState<AdvisorModalTab>('qa');
   const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [sessionAuthenticated, setSessionAuthenticated] = useState<boolean>(
-    () => state.registration?.status === 'approved'
-  );
+  const [sessionAuthenticated, setSessionAuthenticated] = useState<boolean>(false);
+  const [apiToken, setApiToken] = useState<string | null>(() => getStoredToken());
+  const [restoring, setRestoring] = useState<boolean>(() => Boolean(getStoredToken()));
+  const revisionRef = useRef<number>(0);
+  const stateRef = useRef<GameState>(state);
+  const savingRef = useRef<boolean>(false);
+  const flushRef = useRef<() => Promise<void>>(async () => {});
   const [shieldConfirmAttack, setShieldConfirmAttack] =
     useState<PendingAttackConfirm | null>(null);
   const [toast, setToast] = useState<ToastMessage | null>(null);
@@ -130,6 +148,99 @@ export default function App() {
     },
     []
   );
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  // Restore an existing server session on page load
+  useEffect(() => {
+    const token = getStoredToken();
+    if (!token) {
+      setRestoring(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const r = await apiGetState(token);
+      if (cancelled) return;
+      if (r.ok && r.data.state) {
+        revisionRef.current = Number(r.data.revision) || 0;
+        const hydrated = hydrateServerState(r.data.state);
+        setState(hydrated);
+        setApiToken(token);
+        if (hydrated.registration.status === 'approved') setSessionAuthenticated(true);
+      } else if (r.status === 401) {
+        storeToken(null);
+        setApiToken(null);
+      }
+      setRestoring(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // While waiting for founder approval, check the server every 20 seconds
+  useEffect(() => {
+    if (!apiToken || sessionAuthenticated) return;
+    const id = window.setInterval(async () => {
+      const r = await apiGetState(apiToken);
+      if (r.ok && r.data.state) {
+        revisionRef.current = Number(r.data.revision) || revisionRef.current;
+        const hydrated = hydrateServerState(r.data.state);
+        setState(hydrated);
+        if (hydrated.registration.status === 'approved') {
+          setSessionAuthenticated(true);
+          pushToast('تم اعتماد حسابك! أهلاً بك في ENGINORA CITY.', 'success');
+        }
+      } else if (r.status === 401) {
+        storeToken(null);
+        setApiToken(null);
+      }
+    }, 20000);
+    return () => window.clearInterval(id);
+  }, [apiToken, sessionAuthenticated, pushToast]);
+
+  // Autosave to the server every 60 seconds while playing, and when the tab is hidden
+  useEffect(() => {
+    if (!apiToken || !sessionAuthenticated) {
+      flushRef.current = async () => {};
+      return;
+    }
+    const flush = async () => {
+      if (savingRef.current) return;
+      savingRef.current = true;
+      try {
+        const r = await apiSaveStatePrepared(apiToken, stateRef.current, revisionRef.current);
+        if (r.ok) {
+          revisionRef.current = Number(r.data.revision) || revisionRef.current;
+          setState((prev) => mergeAuthoritative(prev, r.data.state));
+        } else if (r.status === 409 && r.data.code === 'REVISION_CONFLICT') {
+          revisionRef.current = Number(r.data.serverRevision) || revisionRef.current;
+          setState(hydrateServerState(r.data.state));
+          pushToast('تم تحديث بيانات حسابك من الخادم.', 'info');
+        } else if (r.status === 401) {
+          storeToken(null);
+          setApiToken(null);
+          setSessionAuthenticated(false);
+          pushToast('انتهت جلسة الدخول، يرجى تسجيل الدخول من جديد.', 'error');
+        }
+      } finally {
+        savingRef.current = false;
+      }
+    };
+    flushRef.current = flush;
+    const id = window.setInterval(flush, 60000);
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') void flush();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [apiToken, sessionAuthenticated, pushToast]);
 
   // Save state whenever it mutates
   useEffect(() => {
@@ -855,16 +966,81 @@ export default function App() {
     }
   };
 
-  const handleSubmitRegistration = (
-    payload: RegistrationSubmitPayload
-  ): { error?: string } => {
-    const res = submitPlayerRegistration(state, payload, Date.now());
+  const applySession = (token: string, serverState: unknown, revision: unknown, fallback?: GameState) => {
+    storeToken(token);
+    setApiToken(token);
+    revisionRef.current = Number(revision) || 0;
+    const hydrated = hydrateServerState(serverState, fallback);
+    setState(hydrated);
+    return hydrated;
+  };
+
+  const handleSubmitRegistration = async (
+    payload: RegistrationSubmitPayload & { password: string }
+  ): Promise<{ error?: string }> => {
+    const { password, ...regPayload } = payload;
+    if (apiToken) {
+      return {
+        error: 'لديك حساب مسجل بالفعل. تواصل مع الإدارة إذا تم رفض طلبك السابق.',
+      };
+    }
+    if (typeof password !== 'string' || password.length < 8) {
+      return { error: 'كلمة المرور يجب أن تكون 8 أحرف أو أرقام على الأقل.' };
+    }
+    const res = submitPlayerRegistration(state, regPayload, Date.now());
     if (res.error) {
       soundFx.play('error', state.soundEnabled);
       return { error: res.error };
     }
+    const receiptId = newReceiptId();
+    const dataUrl = res.state.registration.receiptPreviewUrl ?? '';
+    const local: GameState = {
+      ...res.state,
+      registration: { ...res.state.registration, receiptId } as GameState['registration'],
+      paymentOrders: res.state.paymentOrders.map((o) =>
+        o.productType === 'registration_fee' ? ({ ...o, receiptId } as typeof o) : o
+      ),
+    };
+    // The receipt photo is uploaded separately as an image; keep the save payload small
+    const regForServer: Record<string, unknown> = { ...local.registration };
+    delete regForServer.receiptPreviewUrl;
+    const ordersForServer = local.paymentOrders.map((o) => {
+      const copy: Record<string, unknown> = { ...o };
+      delete copy.receiptPreviewUrl;
+      return copy;
+    });
+    const r = await apiRegister({
+      email: regPayload.email.trim(),
+      phone: regPayload.phone.trim(),
+      password,
+      commanderName: regPayload.nickname.trim(),
+      serverId: local.selectedServerId,
+      registration: regForServer,
+      paymentOrders: ordersForServer,
+    });
+    if (!r.ok) {
+      soundFx.play('error', state.soundEnabled);
+      return { error: r.error ?? 'تعذر إنشاء الحساب.' };
+    }
+    if (!r.data.token) {
+      return {
+        error:
+          r.data.message ||
+          'تم إنشاء الحساب لكن لا يمكن الدخول قبل تأكيد البريد الإلكتروني.',
+      };
+    }
+    const hydrated = applySession(r.data.token, r.data.state, r.data.revision, local);
+    const uploaded = dataUrl
+      ? await ensureReceiptUploaded(r.data.token, receiptId, dataUrl)
+      : 'ok';
+    // Make sure the server has the pending registration + payment order right away
+    const saved = await apiSaveStatePrepared(r.data.token, hydrated, revisionRef.current);
+    if (saved.ok) revisionRef.current = Number(saved.data.revision) || revisionRef.current;
+    if (uploaded !== 'ok') {
+      pushToast('تم إنشاء الحساب لكن تعذر رفع صورة الفاتورة، تواصل مع الإدارة.', 'error');
+      return {};
+    }
     soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
     pushToast('تم استلام طلب تسجيلك وفاتورة الـ 200 ريال وبانتظار اعتماد المؤسس.', 'success');
     return {};
   };
@@ -882,49 +1058,57 @@ export default function App() {
     }));
   };
 
-  const handleLoginApproved = (identifier: string): { error?: string } => {
-    const clean = identifier.trim().toLowerCase();
-    if (!clean) {
-      return { error: 'أدخل البريد الإلكتروني أو رقم الجوال أو الاسم المستعار.' };
+  const handleLoginApproved = async (
+    identifier: string,
+    password: string
+  ): Promise<{ error?: string }> => {
+    const clean = identifier.trim();
+    if (!clean || !password) {
+      return { error: 'أدخل البريد الإلكتروني أو رقم الجوال وكلمة المرور.' };
     }
-    if (state.registration.status !== 'approved') {
-      return {
-        error:
-          state.registration.status === 'pending'
-            ? 'طلب تسجيلك لا يزال قيد المراجعة من قبل المؤسس.'
-            : 'هذا الحساب غير معتمد بعد. يرجى إتمام التسجيل وإرفاق فاتورة الرسوم.',
-      };
+    const r = await apiLogin(clean, password);
+    if (!r.ok || !r.data.token) {
+      soundFx.play('error', state.soundEnabled);
+      return { error: r.error ?? 'بيانات الدخول غير صحيحة.' };
     }
-    const candidates = [
-      state.registration.email,
-      state.registration.phone,
-      state.registration.nickname,
-      state.accountId,
-    ]
-      .filter(Boolean)
-      .map((v) => v.trim().toLowerCase());
-
-    if (!candidates.includes(clean)) {
-      return { error: 'بيانات الدخول غير مطابقة للحساب المعتمد على هذا الجهاز.' };
+    const hydrated = applySession(r.data.token, r.data.state, r.data.revision);
+    if (hydrated.registration.status !== 'approved') {
+      pushToast(
+        hydrated.registration.status === 'pending'
+          ? 'طلب تسجيلك قيد المراجعة من المؤسس. سيتم إدخالك تلقائيًا فور الاعتماد.'
+          : 'هذا الحساب غير معتمد بعد.',
+        'info'
+      );
+      return {};
     }
-
-    if (!isServerOpen) {
+    const srv =
+      hydrated.adminConfig.servers?.find((sv) => sv.id === hydrated.selectedServerId) ??
+      hydrated.adminConfig.servers?.[0];
+    if (!srv?.isOpen) {
       return {
         error: 'السيرفر مغلق حاليًا — لا يمكن الدخول إلا بعد فتح السيرفر من لوحة الإدارة.',
       };
     }
-
-    soundFx.play('claim', state.soundEnabled);
+    soundFx.play('claim', hydrated.soundEnabled);
     setSessionAuthenticated(true);
-    pushToast(`أهلاً بك أيها القائد ${state.registration.nickname || state.commanderName}.`, 'success');
+    pushToast(
+      `أهلاً بك أيها القائد ${hydrated.registration.nickname || hydrated.commanderName}.`,
+      'success'
+    );
     return {};
   };
 
-
-  const handleResetCity = () => {
-    const fresh = clearSavedState();
-    setState(fresh);
-    setSessionAuthenticated(fresh.registration.status === 'approved');
+  const handleResetCity = async () => {
+    if (apiToken) {
+      const r = await apiResetCity(apiToken);
+      if (!r.ok) {
+        pushToast(r.error ?? 'تعذر إعادة ضبط المدينة.', 'error');
+        return;
+      }
+      applySession(apiToken, r.data.state, r.data.revision);
+    } else {
+      setState(clearSavedState());
+    }
     setSelectedPlotId(null);
     setPendingBuildType(null);
     setActiveSection('city');
@@ -934,6 +1118,33 @@ export default function App() {
     );
   };
 
+  const handleLogout = async () => {
+    const token = apiToken;
+    if (token) {
+      await flushRef.current();
+      await apiLogout(token);
+    }
+    storeToken(null);
+    setApiToken(null);
+    setSessionAuthenticated(false);
+    setShowSettingsModal(false);
+    setState(clearSavedState());
+    setSelectedPlotId(null);
+    setPendingBuildType(null);
+    setActiveSection('city');
+  };
+
+
+  if (restoring) {
+    return (
+      <div
+        dir="rtl"
+        className="min-h-[100dvh] w-screen bg-[#060B17] flex items-center justify-center text-amber-200 text-sm font-bold"
+      >
+        جارٍ تحميل حسابك...
+      </div>
+    );
+  }
 
   // Player Registration, Login & Server Gate
   if (state.registration.status !== 'approved' || !sessionAuthenticated || !isServerOpen) {
@@ -1317,6 +1528,7 @@ export default function App() {
             setState((prev) => ({ ...prev, soundEnabled: !prev.soundEnabled }))
           }
           onResetCity={handleResetCity}
+          onLogout={handleLogout}
           onGenerateTelegramCode={handleGenerateTelegramCode}
           onLinkTelegram={handleLinkTelegram}
           onUnlinkTelegram={handleUnlinkTelegram}
