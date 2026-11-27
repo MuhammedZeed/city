@@ -78,6 +78,8 @@ export const apiRegister = (body: Record<string, unknown>) =>
 export const apiLogin = (identifier: string, password: string) =>
   request('/api/auth/login', 'POST', { identifier, password });
 
+export const apiGetConfig = () => request('/api/game/config', 'GET');
+
 export const apiGetState = (token: string) =>
   request('/api/game/state', 'GET', undefined, token);
 
