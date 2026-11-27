@@ -116,6 +116,7 @@ export interface PlayerRegistration {
   serverId?: string;
   transferRef?: string;
   receiptName?: string;
+  receiptId?: string;
   receiptPreviewUrl?: string;
   acceptedPolicies?: boolean;
   acceptedPoliciesAt?: number;
@@ -432,6 +433,7 @@ export interface PaymentOrder {
   amountSar: number;
   paymentMethod: PaymentMethodId;
   receiptName?: string;
+  receiptId?: string;
   receiptPreviewUrl?: string;
   transferRef?: string;
   status: 'pending' | 'approved' | 'rejected' | 'refunded';

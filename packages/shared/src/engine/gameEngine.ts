@@ -391,23 +391,19 @@ export function createInitialState(commanderName = 'القائد سيف'): GameS
   };
 }
 
-export function loadSavedState(): GameState {
-  if (typeof window === 'undefined') return createInitialState();
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return createInitialState();
-    const parsed = JSON.parse(raw) as Partial<GameState> & {
-      speedUpCards?: Record<string, number>;
-    };
-    if (
-      !parsed ||
-      (parsed.version !== 2 && parsed.version !== 3) ||
-      !Array.isArray(parsed.buildings)
-    ) {
-      return createInitialState();
-    }
+export function hydrateLoadedState(
+  parsed: Partial<GameState> & { speedUpCards?: Record<string, number> },
+  now: number = Date.now()
+): GameState {
+  if (
+    !parsed ||
+    (parsed.version !== 2 && parsed.version !== 3) ||
+    !Array.isArray(parsed.buildings)
+  ) {
+    return createInitialState();
+  }
 
-    const base = createInitialState(parsed.commanderName ?? 'القائد سيف');
+  const base = createInitialState(parsed.commanderName ?? 'القائد سيف');
     const hydratedGemLedger = parsed.gemLedger
       ? {
           chargedGems: parsed.gemLedger.chargedGems ?? 0,
@@ -587,7 +583,39 @@ export function loadSavedState(): GameState {
         : { ...DEFAULT_REGISTRATION },
     };
 
-    return advanceGameState(hydrated, Date.now()).state;
+  return advanceGameState(hydrated, now).state;
+}
+
+export function readLegacyLocalState(): GameState | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<GameState> & {
+      speedUpCards?: Record<string, number>;
+    };
+    if (
+      !parsed ||
+      (parsed.version !== 2 && parsed.version !== 3) ||
+      !Array.isArray(parsed.buildings)
+    ) {
+      return null;
+    }
+    return hydrateLoadedState(parsed, Date.now());
+  } catch {
+    return null;
+  }
+}
+
+export function loadSavedState(): GameState {
+  if (typeof window === 'undefined') return createInitialState();
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return createInitialState();
+    const parsed = JSON.parse(raw) as Partial<GameState> & {
+      speedUpCards?: Record<string, number>;
+    };
+    return hydrateLoadedState(parsed, Date.now());
   } catch {
     return createInitialState();
   }
@@ -3254,7 +3282,8 @@ export function submitPaymentOrder(
   transferRef: string,
   receiptName: string | undefined,
   receiptPreviewUrl: string | undefined,
-  now: number
+  now: number,
+  receiptId?: string
 ): { state: GameState; order?: PaymentOrder; error?: string } {
   const pmInfo = getPaymentMethodDiscountedSar(100, paymentMethod, state.adminConfig);
   if (!pmInfo.enabled) {
@@ -3289,7 +3318,11 @@ export function submitPaymentOrder(
     title = `${title} — خصم وسيلة الدفع ${discountPct}%`;
   }
 
-  if ((paymentMethod === 'bank_transfer' || paymentMethod === 'binance') && !receiptPreviewUrl) {
+  if (
+    (paymentMethod === 'bank_transfer' || paymentMethod === 'binance') &&
+    !receiptPreviewUrl &&
+    !receiptId
+  ) {
     return {
       state,
       error:
@@ -3310,6 +3343,7 @@ export function submitPaymentOrder(
     paymentMethod,
     transferRef: transferRef.trim() || undefined,
     receiptName,
+    ...(receiptId ? { receiptId } : {}),
     receiptPreviewUrl,
     status: 'pending',
     createdAt: now,
@@ -4180,6 +4214,7 @@ export interface RegistrationSubmitPayload {
   serverId?: string;
   transferRef?: string;
   receiptName?: string;
+  receiptId?: string;
   receiptPreviewUrl?: string;
   acceptedPolicies: boolean;
 }
@@ -4227,7 +4262,7 @@ export function submitPlayerRegistration(
   if (phone.length < 9) {
     return { state, error: 'أدخل رقم الجوال بشكل صحيح.' };
   }
-  if (!payload.receiptPreviewUrl) {
+  if (!payload.receiptPreviewUrl && !payload.receiptId) {
     return {
       state,
       error: `يرجى إرفاق صورة فاتورة دفع رسوم التسجيل (${feeSar} ريال).`,
@@ -4256,6 +4291,7 @@ export function submitPlayerRegistration(
     paymentMethod,
     transferRef: transferRef || undefined,
     receiptName: payload.receiptName || 'فاتورة-التسجيل.png',
+    ...(payload.receiptId ? { receiptId: payload.receiptId } : {}),
     receiptPreviewUrl: payload.receiptPreviewUrl,
     status: 'pending',
     createdAt: now,
@@ -4282,6 +4318,7 @@ export function submitPlayerRegistration(
         serverId: targetServerId,
         transferRef: transferRef || undefined,
         receiptName: regOrder.receiptName,
+        ...(payload.receiptId ? { receiptId: payload.receiptId } : {}),
         receiptPreviewUrl: payload.receiptPreviewUrl,
         acceptedPolicies: true,
         acceptedPoliciesAt: now,
