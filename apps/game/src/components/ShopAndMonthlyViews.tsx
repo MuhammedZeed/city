@@ -1,5 +1,4 @@
 import React, { useState } from 'react';
-import { compressReceiptFile } from '../api/client';
 import {
   CalendarCheck2,
   CheckCircle2,
@@ -21,6 +20,7 @@ import {
   PAYMENT_METHODS_META,
   SHIELD_PACKAGES,
   SPEEDUP_CARDS_META,
+  compressReceiptFile,
 } from '@enginora/shared';
 import {
   formatDuration,
@@ -123,11 +123,13 @@ export const StoreView: React.FC<StoreViewProps> = ({
     if (!file) return;
     compressReceiptFile(file)
       .then((out) => {
-        setReceiptName(file.name);
-        setReceiptPreviewUrl(out);
+        setReceiptName(out.name);
+        setReceiptPreviewUrl(out.dataUrl);
       })
       .catch((err: unknown) => {
-        setReceiptError(err instanceof Error ? err.message : 'تعذر معالجة صورة الإيصال.');
+        setReceiptError(
+          err instanceof Error ? err.message : 'تعذر معالجة صورة الإيصال.'
+        );
       });
   };
 

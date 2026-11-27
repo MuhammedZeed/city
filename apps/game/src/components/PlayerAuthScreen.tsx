@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   CheckCircle2,
   Clock,
@@ -7,11 +7,14 @@ import {
   FileCheck2,
   FileText,
   IdCard,
+  KeyRound,
   Lock,
   LogIn,
+  LogOut,
   Mail,
   Phone,
   Receipt,
+  RefreshCw,
   Server,
   Upload,
   User,
@@ -22,28 +25,48 @@ import {
 import sovereignHeroImg from '../assets/images/login_sovereign_command_1795519264931.jpg';
 import { PAYMENT_METHODS_META } from '@enginora/shared';
 import {
+  compressReceiptFile,
+  fetchReceiptBlobUrl,
   formatKsaDateTime,
   getPaymentMethodDiscountedSar,
   RegistrationSubmitPayload,
 } from '@enginora/shared';
 import { GameState, PaymentMethodId } from '@enginora/shared';
 import { LegalPoliciesModal } from './LegalPoliciesModal';
-import { compressReceiptFile } from '../api/client';
+
+export interface PlayerRegisterPayload extends RegistrationSubmitPayload {
+  password?: string;
+}
 
 interface PlayerAuthScreenProps {
   state: GameState;
+  authToken?: string | null;
+  apiBaseUrl?: string;
+  isAuthenticated?: boolean;
+  isBusy?: boolean;
   onSubmitRegistration: (
-    payload: RegistrationSubmitPayload & { password: string }
-  ) => Promise<{ error?: string }>;
-  onLoginApproved: (identifier: string, password: string) => Promise<{ error?: string }>;
+    payload: PlayerRegisterPayload
+  ) => Promise<{ error?: string }> | { error?: string };
+  onLoginApproved: (
+    identifier: string,
+    password: string
+  ) => Promise<{ error?: string }> | { error?: string };
   onSelectServer: (serverId: string) => void;
+  onRefreshStatus?: () => Promise<void> | void;
+  onLogout?: () => Promise<void> | void;
 }
 
 export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
   state,
+  authToken = null,
+  apiBaseUrl,
+  isAuthenticated = false,
+  isBusy = false,
   onSubmitRegistration,
   onLoginApproved,
   onSelectServer,
+  onRefreshStatus,
+  onLogout,
 }) => {
   const reg = state.registration;
   const baseFeeSar = state.adminConfig.registrationFeeSar || 200;
@@ -57,13 +80,15 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
   );
 
   const [mode, setMode] = useState<'register' | 'login'>(
-    reg.status === 'approved' ? 'login' : 'register'
+    reg.status === 'approved' ? 'login' : 'login'
   );
   const [nickname, setNickname] = useState(reg.nickname || '');
   const [fullName, setFullName] = useState(reg.fullName || '');
   const [nationalId, setNationalId] = useState(reg.nationalId || '');
   const [email, setEmail] = useState(reg.email || '');
   const [phone, setPhone] = useState(reg.phone || '');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [transferRef, setTransferRef] = useState(reg.transferRef || '');
   const [receiptName, setReceiptName] = useState(reg.receiptName || '');
   const [receiptPreviewUrl, setReceiptPreviewUrl] = useState(reg.receiptPreviewUrl || '');
@@ -87,35 +112,94 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
   );
   const feeSar = regDiscount.finalSar;
 
-  const [loginIdentifier, setLoginIdentifier] = useState(reg.email || reg.nickname || '');
-  const [password, setPassword] = useState('');
+  const [loginIdentifier, setLoginIdentifier] = useState(reg.email || reg.phone || '');
   const [loginPassword, setLoginPassword] = useState('');
-  const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [previewLightbox, setPreviewLightbox] = useState<string | null>(null);
+  const [serverReceiptUrl, setServerReceiptUrl] = useState<string | null>(null);
   const [allowResubmit, setAllowResubmit] = useState(false);
+  const [localSubmitting, setLocalSubmitting] = useState(false);
 
-  const isPending = reg.status === 'pending' && !allowResubmit;
-  const isRejected = reg.status === 'rejected' && !allowResubmit;
+  useEffect(() => {
+    if (reg.nickname) setNickname(reg.nickname);
+    if (reg.fullName) setFullName(reg.fullName);
+    if (reg.nationalId) setNationalId(reg.nationalId);
+    if (reg.email) setEmail(reg.email);
+    if (reg.phone) setPhone(reg.phone);
+    if (reg.transferRef) setTransferRef(reg.transferRef);
+    if (reg.receiptName) setReceiptName(reg.receiptName);
+    if (reg.receiptPreviewUrl) setReceiptPreviewUrl(reg.receiptPreviewUrl);
+    if (reg.acceptedPolicies) setAcceptedPolicies(true);
+  }, [
+    reg.acceptedPolicies,
+    reg.email,
+    reg.fullName,
+    reg.nationalId,
+    reg.nickname,
+    reg.phone,
+    reg.receiptName,
+    reg.receiptPreviewUrl,
+    reg.transferRef,
+  ]);
 
-  const handleReceiptChange = (fileList: FileList | null) => {
+  useEffect(() => {
+    if (!authToken || !reg.receiptId || reg.receiptPreviewUrl) {
+      setServerReceiptUrl(null);
+      return;
+    }
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    void (async () => {
+      const url = await fetchReceiptBlobUrl(authToken, reg.receiptId!, apiBaseUrl);
+      if (cancelled) {
+        if (url) URL.revokeObjectURL(url);
+        return;
+      }
+      objectUrl = url;
+      setServerReceiptUrl(url);
+    })();
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [authToken, reg.receiptId, reg.receiptPreviewUrl, apiBaseUrl]);
+
+  const busy = isBusy || localSubmitting;
+  const isPending = isAuthenticated && reg.status === 'pending' && !allowResubmit;
+  const isRejected = isAuthenticated && reg.status === 'rejected' && !allowResubmit;
+  const isApprovedClosed = isAuthenticated && reg.status === 'approved' && !isServerOpen;
+  const effectiveReceiptUrl = reg.receiptPreviewUrl || serverReceiptUrl || '';
+
+  const handleReceiptChange = async (fileList: FileList | null) => {
     const file = fileList?.[0];
     if (!file) return;
-    compressReceiptFile(file)
-      .then((out) => {
-        setFormError(null);
-        setReceiptName(file.name);
-        setReceiptPreviewUrl(out);
-      })
-      .catch((err: unknown) => {
-        setFormError(err instanceof Error ? err.message : 'تعذر معالجة صورة الفاتورة.');
-      });
+    try {
+      const optimized = await compressReceiptFile(file);
+      setFormError(null);
+      setReceiptName(optimized.name);
+      setReceiptPreviewUrl(optimized.dataUrl);
+    } catch (err) {
+      setFormError(
+        err instanceof Error ? err.message : 'تعذر قراءة صورة الفاتورة المختارة.'
+      );
+    }
   };
 
   const handleSubmitReg = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
-    if (!receiptPreviewUrl) {
+
+    if (!isAuthenticated) {
+      if (password.length < 8) {
+        setFormError('كلمة المرور يجب أن تكون 8 أحرف أو أرقام على الأقل.');
+        return;
+      }
+      if (password !== confirmPassword) {
+        setFormError('تأكيد كلمة المرور غير مطابق.');
+        return;
+      }
+    }
+    if (!receiptPreviewUrl && !reg.receiptId) {
       setFormError(`يرجى إرفاق صورة فاتورة دفع الـ ${feeSar} ريال لإتمام الطلب.`);
       return;
     }
@@ -125,44 +209,53 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
       );
       return;
     }
-    if (password.length < 8) {
-      setFormError('كلمة المرور يجب أن تكون 8 أحرف أو أرقام على الأقل.');
-      return;
-    }
-    setBusy(true);
-    const res = await onSubmitRegistration({
-      password,
-      nickname,
-      fullName,
-      nationalId,
-      email,
-      phone,
-      paymentMethod: activePayMethod,
-      serverId: activeServer?.id,
-      transferRef,
-      receiptName,
-      receiptPreviewUrl,
-      acceptedPolicies,
-    });
-    setBusy(false);
-    if (res.error) {
-      setFormError(res.error);
-    } else {
-      setPassword('');
-      setAllowResubmit(false);
+
+    setLocalSubmitting(true);
+    try {
+      const res = await onSubmitRegistration({
+        nickname,
+        fullName,
+        nationalId,
+        email,
+        phone,
+        password: !isAuthenticated ? password : undefined,
+        paymentMethod: activePayMethod,
+        serverId: activeServer?.id,
+        transferRef,
+        receiptName,
+        receiptId: receiptPreviewUrl ? undefined : reg.receiptId,
+        receiptPreviewUrl: receiptPreviewUrl || undefined,
+        acceptedPolicies,
+      });
+      if (res.error) {
+        setFormError(res.error);
+      } else {
+        setAllowResubmit(false);
+      }
+    } finally {
+      setLocalSubmitting(false);
     }
   };
 
   const handleSubmitLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
-    setBusy(true);
-    const res = await onLoginApproved(loginIdentifier, loginPassword);
-    setBusy(false);
-    if (res.error) {
-      setFormError(res.error);
-    } else {
-      setLoginPassword('');
+    if (!loginIdentifier.trim()) {
+      setFormError('أدخل البريد الإلكتروني أو رقم الجوال أو معرّف الحساب.');
+      return;
+    }
+    if (!loginPassword) {
+      setFormError('أدخل كلمة المرور.');
+      return;
+    }
+    setLocalSubmitting(true);
+    try {
+      const res = await onLoginApproved(loginIdentifier, loginPassword);
+      if (res.error) {
+        setFormError(res.error);
+      }
+    } finally {
+      setLocalSubmitting(false);
     }
   };
 
@@ -284,6 +377,50 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
                   )}
                 </div>
               )}
+              {/* Approved but Server Closed View */}
+              {isApprovedClosed && (
+                <div className="space-y-4">
+                  <div className="flex items-start gap-3 pb-4 border-b border-slate-800">
+                    <div className="w-11 h-11 rounded-xl bg-emerald-500/15 border border-emerald-400/50 flex items-center justify-center shrink-0">
+                      <CheckCircle2 className="w-6 h-6 text-emerald-300" />
+                    </div>
+                    <div className="space-y-1">
+                      <h2 className="text-base sm:text-lg font-bold text-emerald-300">
+                        حسابك معتمد وجاهز للدخول
+                      </h2>
+                      <p className="text-xs text-slate-300 leading-relaxed">
+                        أهلاً بالقائد <strong>{reg.nickname || state.commanderName}</strong> (معرّف الحساب:{' '}
+                        <span className="font-num text-amber-300">{state.accountId}</span>). السيرفر{' '}
+                        <strong>{activeServer?.name}</strong> مغلق حاليًا من الإدارة — سيُفتح تلقائيًا فور تفعيله.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    {onRefreshStatus && (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => onRefreshStatus()}
+                        className="min-h-[42px] px-4 py-2 rounded-xl bg-[#1D4ED8] hover:bg-blue-600 text-white text-xs font-bold flex items-center gap-1.5"
+                      >
+                        <RefreshCw className={`w-4 h-4 ${busy ? 'animate-spin' : ''}`} />
+                        <span>تحديث حالة السيرفر الآن</span>
+                      </button>
+                    )}
+                    {onLogout && (
+                      <button
+                        type="button"
+                        onClick={() => onLogout()}
+                        className="min-h-[42px] px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1.5"
+                      >
+                        <LogOut className="w-4 h-4" />
+                        <span>تسجيل الخروج</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Pending Approval View */}
               {isPending && (
                 <div className="space-y-4">
@@ -296,7 +433,8 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
                         طلب التسجيل قيد المراجعة
                       </h2>
                       <p className="text-xs text-slate-300 leading-relaxed">
-                        تم استلام بياناتك وصورة فاتورة دفع رسوم التفعيل ({reg.feeAmountSar} ريال). ستتم مراجعة الفاتورة والبيانات وتفعيل حسابك فور الاعتماد.
+                        تم استلام بياناتك وصورة فاتورة دفع رسوم التفعيل ({reg.feeAmountSar} ريال) على السحابة. رقم حسابك:{' '}
+                        <strong className="font-num text-amber-200">{state.accountId}</strong>.
                       </p>
                     </div>
                   </div>
@@ -330,14 +468,20 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
                     </div>
                   </div>
 
-                  {reg.receiptPreviewUrl && (
+                  {(effectiveReceiptUrl || reg.receiptId) && (
                     <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl bg-slate-900/75 border border-slate-700/70 text-xs">
                       <div className="flex items-center gap-3">
-                        <img
-                          src={reg.receiptPreviewUrl}
-                          alt="فاتورة التسجيل"
-                          className="w-12 h-12 rounded-lg object-cover border border-slate-600"
-                        />
+                        {effectiveReceiptUrl ? (
+                          <img
+                            src={effectiveReceiptUrl}
+                            alt="فاتورة التسجيل"
+                            className="w-12 h-12 rounded-lg object-cover border border-slate-600"
+                          />
+                        ) : (
+                          <div className="w-12 h-12 rounded-lg bg-slate-800 border border-slate-600 flex items-center justify-center text-[10px] text-slate-400">
+                            صورة
+                          </div>
+                        )}
                         <div>
                           <div className="font-bold text-slate-100">
                             {reg.receiptName || 'فاتورة السداد'}
@@ -349,27 +493,49 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
                           )}
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setPreviewLightbox(reg.receiptPreviewUrl!)}
-                        className="min-h-[38px] px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 font-bold flex items-center gap-1.5"
-                      >
-                        <Eye className="w-4 h-4" />
-                        <span>معاينة الفاتورة</span>
-                      </button>
+                      {effectiveReceiptUrl && (
+                        <button
+                          type="button"
+                          onClick={() => setPreviewLightbox(effectiveReceiptUrl)}
+                          className="min-h-[38px] px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 font-bold flex items-center gap-1.5"
+                        >
+                          <Eye className="w-4 h-4" />
+                          <span>معاينة الفاتورة</span>
+                        </button>
+                      )}
                     </div>
                   )}
 
                   <div className="flex flex-wrap items-center justify-between gap-2.5 pt-2">
-                    <span className="text-[11px] text-slate-400">
-                      حالة الموافقة على السياسات: مؤكدة · الطلب قيد المراجعة
-                    </span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {onRefreshStatus && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => onRefreshStatus()}
+                          className="min-h-[40px] px-3.5 py-2 rounded-xl bg-[#1D4ED8] hover:bg-blue-600 text-white text-xs font-bold flex items-center gap-1.5"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${busy ? 'animate-spin' : ''}`} />
+                          <span>تحديث حالة الطلب</span>
+                        </button>
+                      )}
+                      {onLogout && (
+                        <button
+                          type="button"
+                          onClick={() => onLogout()}
+                          className="min-h-[40px] px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1.5"
+                        >
+                          <LogOut className="w-3.5 h-3.5" />
+                          <span>خروج / تبديل الحساب</span>
+                        </button>
+                      )}
+                    </div>
                     <button
                       type="button"
                       onClick={() => setAllowResubmit(true)}
-                      className="min-h-[42px] px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold"
+                      className="min-h-[40px] px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold"
                     >
-                      تعديل البيانات أو إعادة إرفاق الفاتورة
+                      تعديل البيانات أو الفاتورة
                     </button>
                   </div>
                 </div>
@@ -377,68 +543,82 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
 
               {/* Rejected Banner */}
               {isRejected && (
-                <div className="p-4 rounded-xl bg-rose-950/55 border border-rose-500/60 space-y-2.5 text-xs">
+                <div className="p-4 rounded-xl bg-rose-950/55 border border-rose-500/60 space-y-3 text-xs">
                   <div className="flex items-center gap-2 font-bold text-rose-200 text-sm">
                     <XCircle className="w-5 h-5 text-rose-400 shrink-0" />
-                    <span>تعذر اعتماد طلب التسجيل السابق</span>
+                    <span>تعذر اعتماد طلب التسجيل السابق ({state.accountId})</span>
                   </div>
                   <p className="text-slate-200 leading-relaxed">
                     السبب: {reg.reviewNote || 'يرجى التحقق من وضوح صورة فاتورة دفع الـ 200 ريال ومطابقة البيانات وإعادة الإرسال.'}
                   </p>
-                  <button
-                    type="button"
-                    onClick={() => setAllowResubmit(true)}
-                    className="min-h-[40px] px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold"
-                  >
-                    تعديل وإعادة إرسال الطلب
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setAllowResubmit(true)}
+                      className="min-h-[40px] px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold"
+                    >
+                      تعديل وإعادة إرسال الطلب
+                    </button>
+                    {onLogout && (
+                      <button
+                        type="button"
+                        onClick={() => onLogout()}
+                        className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-bold flex items-center gap-1.5"
+                      >
+                        <LogOut className="w-3.5 h-3.5" />
+                        <span>تسجيل الخروج</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
 
               {/* Registration / Login Tabs */}
-              {!isPending && !isRejected && (
+              {!isPending && !isRejected && !isApprovedClosed && (
                 <>
                   <div className="space-y-2">
                     <h2 className="text-lg sm:text-xl font-bold text-slate-100">
                       بوابة دخول القادة وتفعيل العضوية
                     </h2>
                     <p className="text-xs text-slate-300 leading-relaxed">
-                      سجّل بياناتك وأرفق صورة فاتورة التفعيل ({feeSar} ريال سعودي) مع الموافقة على سياسة الخصوصية والشروط، أو سجّل الدخول بحسابك المعتمد.
+                      سجّل حسابًا جديدًا وأرفق صورة فاتورة التفعيل ({feeSar} ريال سعودي)، أو ادخل مباشرة بحسابك المسجل في الخادم.
                     </p>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-950/85 border border-slate-800">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setFormError(null);
-                        setMode('register');
-                      }}
-                      className={`min-h-[42px] px-3 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
-                        mode === 'register'
-                          ? 'bg-[#1D4ED8] text-white shadow'
-                          : 'text-slate-300 hover:text-white'
-                      }`}
-                    >
-                      <UserPlus className="w-4 h-4 shrink-0" />
-                      <span>تسجيل حساب ({feeSar} ريال)</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setFormError(null);
-                        setMode('login');
-                      }}
-                      className={`min-h-[42px] px-3 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
-                        mode === 'login'
-                          ? 'bg-[#1D4ED8] text-white shadow'
-                          : 'text-slate-300 hover:text-white'
-                      }`}
-                    >
-                      <LogIn className="w-4 h-4 shrink-0" />
-                      <span>دخول حساب معتمد</span>
-                    </button>
-                  </div>
+                  {!isAuthenticated && (
+                    <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-950/85 border border-slate-800">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setFormError(null);
+                          setMode('register');
+                        }}
+                        className={`min-h-[42px] px-3 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+                          mode === 'register'
+                            ? 'bg-[#1D4ED8] text-white shadow'
+                            : 'text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        <UserPlus className="w-4 h-4 shrink-0" />
+                        <span>تسجيل حساب جديد ({feeSar} ريال)</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setFormError(null);
+                          setMode('login');
+                        }}
+                        className={`min-h-[42px] px-3 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+                          mode === 'login'
+                            ? 'bg-[#1D4ED8] text-white shadow'
+                            : 'text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        <LogIn className="w-4 h-4 shrink-0" />
+                        <span>دخول حساب مسجل</span>
+                      </button>
+                    </div>
+                  )}
 
                   {formError && (
                     <div
@@ -449,7 +629,7 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
                     </div>
                   )}
 
-                  {mode === 'register' ? (
+                  {mode === 'register' || isAuthenticated ? (
                     <form onSubmit={handleSubmitReg} className="space-y-3.5 text-xs">
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <div>
@@ -558,24 +738,44 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
                         </div>
                       </div>
 
-                      <div>
-                        <label className="block text-slate-300 font-semibold mb-1">
-                          كلمة المرور * <span className="text-slate-400 font-normal">(8 أحرف أو أرقام على الأقل)</span>
-                        </label>
-                        <div className="relative">
-                          <Lock className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
-                          <input
-                            type="password"
-                            required
-                            minLength={8}
-                            autoComplete="new-password"
-                            value={password}
-                            onChange={(e) => setPassword(e.target.value)}
-                            placeholder="كلمة مرور لدخول حسابك لاحقًا"
-                            className="w-full min-h-[44px] pr-9 pl-3 py-2 rounded-xl bg-slate-950/90 border border-slate-700 font-num text-slate-100 focus:outline-none focus:border-amber-400"
-                          />
+                      {!isAuthenticated && (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-slate-300 font-semibold mb-1">
+                              كلمة المرور (8 أحرف فأكثر) *
+                            </label>
+                            <div className="relative">
+                              <KeyRound className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+                              <input
+                                type="password"
+                                required
+                                minLength={8}
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                placeholder="••••••••"
+                                className="w-full min-h-[44px] pr-9 pl-3 py-2 rounded-xl bg-slate-950/90 border border-slate-700 text-slate-100 focus:outline-none focus:border-amber-400"
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-slate-300 font-semibold mb-1">
+                              تأكيد كلمة المرور *
+                            </label>
+                            <div className="relative">
+                              <KeyRound className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+                              <input
+                                type="password"
+                                required
+                                minLength={8}
+                                value={confirmPassword}
+                                onChange={(e) => setConfirmPassword(e.target.value)}
+                                placeholder="••••••••"
+                                className="w-full min-h-[44px] pr-9 pl-3 py-2 rounded-xl bg-slate-950/90 border border-slate-700 text-slate-100 focus:outline-none focus:border-amber-400"
+                              />
+                            </div>
+                          </div>
                         </div>
-                      </div>
+                      )}
 
                       {/* Payment Method Selection with Per-Method Discounts */}
                       <div className="space-y-2">
@@ -648,27 +848,31 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
                               {PAYMENT_METHODS_META[activePayMethod].name} (مطلوبة) *
                             </span>
                           </span>
-                          <span className="text-[11px] text-slate-300">PNG / JPG / WEBP · حد 2MB</span>
+                          <span className="text-[11px] text-slate-300">PNG / JPG / WEBP</span>
                         </div>
 
                         <div className="flex flex-wrap items-center gap-3">
                           <label className="min-h-[44px] px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-sky-200 font-bold flex items-center gap-2 cursor-pointer transition-colors">
                             <Upload className="w-4 h-4 text-amber-300 shrink-0" />
                             <span>
-                              {receiptPreviewUrl ? 'تغيير صورة الفاتورة' : `إرفاق صورة فاتورة الـ ${feeSar} ريال`}
+                              {receiptPreviewUrl || effectiveReceiptUrl
+                                ? 'تغيير صورة الفاتورة'
+                                : `إرفاق صورة فاتورة الـ ${feeSar} ريال`}
                             </span>
                             <input
                               type="file"
                               accept="image/png,image/jpeg,image/webp"
-                              onChange={(e) => handleReceiptChange(e.target.files)}
+                              onChange={(e) => void handleReceiptChange(e.target.files)}
                               className="hidden"
                             />
                           </label>
 
-                          {receiptPreviewUrl && (
+                          {(receiptPreviewUrl || effectiveReceiptUrl) && (
                             <button
                               type="button"
-                              onClick={() => setPreviewLightbox(receiptPreviewUrl)}
+                              onClick={() =>
+                                setPreviewLightbox(receiptPreviewUrl || effectiveReceiptUrl)
+                              }
                               className="min-h-[44px] px-3 py-1.5 rounded-xl bg-emerald-950/60 border border-emerald-500/45 text-emerald-200 flex items-center gap-2"
                             >
                               <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
@@ -726,26 +930,41 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
                         </label>
                       </div>
 
-                      <button
-                        type="submit"
-                        disabled={busy}
-                        className="w-full min-h-[46px] px-5 py-3 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 font-bold text-sm shadow-lg transition-colors"
-                      >
-                        {busy ? 'جارٍ إرسال الطلب...' : `إرسال طلب التسجيل وفاتورة الـ ${feeSar} ريال للمراجعة`}
-                      </button>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="submit"
+                          disabled={busy}
+                          className="flex-1 min-h-[46px] px-5 py-3 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 font-bold text-sm shadow-lg transition-colors"
+                        >
+                          {busy
+                            ? 'جارٍ الإرسال إلى الخادم...'
+                            : allowResubmit
+                              ? `إعادة إرسال الطلب وفاتورة الـ ${feeSar} ريال للمراجعة`
+                              : `إرسال طلب التسجيل وفاتورة الـ ${feeSar} ريال للمراجعة`}
+                        </button>
+                        {allowResubmit && (
+                          <button
+                            type="button"
+                            onClick={() => setAllowResubmit(false)}
+                            className="min-h-[46px] px-4 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs"
+                          >
+                            رجوع
+                          </button>
+                        )}
+                      </div>
                     </form>
                   ) : (
                     <form onSubmit={handleSubmitLogin} className="space-y-4 text-xs">
                       <div>
                         <label className="block text-slate-300 font-semibold mb-1.5">
-                          البريد الإلكتروني أو رقم الجوال أو الاسم المستعار المعتمد
+                          البريد الإلكتروني أو رقم الجوال أو معرّف الحساب (ENG-...)
                         </label>
                         <input
                           type="text"
                           required
                           value={loginIdentifier}
                           onChange={(e) => setLoginIdentifier(e.target.value)}
-                          placeholder="أدخل البريد الإلكتروني أو رقم الجوال أو معرّف الحساب"
+                          placeholder="name@example.com أو 05XXXXXXXX أو ENG-..."
                           className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl bg-slate-950/90 border border-slate-700 text-slate-100 focus:outline-none focus:border-amber-400"
                         />
                       </div>
@@ -754,41 +973,28 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
                         <label className="block text-slate-300 font-semibold mb-1.5">
                           كلمة المرور
                         </label>
-                        <input
-                          type="password"
-                          required
-                          autoComplete="current-password"
-                          value={loginPassword}
-                          onChange={(e) => setLoginPassword(e.target.value)}
-                          placeholder="كلمة المرور"
-                          className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl bg-slate-950/90 border border-slate-700 text-slate-100 focus:outline-none focus:border-amber-400"
-                        />
-                      </div>
-
-                      <div
-                        className={`p-3.5 rounded-xl border text-[11px] leading-relaxed ${
-                          reg.status === 'approved' && !isServerOpen
-                            ? 'bg-rose-950/45 border-rose-500/50 text-rose-200'
-                            : 'bg-slate-900/75 border-slate-800 text-slate-300'
-                        }`}
-                      >
-                        {reg.status === 'approved'
-                          ? isServerOpen
-                            ? `حسابك معتمد باسم «${reg.nickname}» (${reg.email}). اضغط دخول للانتقال إلى مدينتك.`
-                            : `حسابك معتمد باسم «${reg.nickname}»، لكن السيرفر مغلق حاليًا — لا يمكن الدخول إلا بعد فتح السيرفر للجميع من الإدارة.`
-                          : `ملاحظة: لا يتم فتح حسابات جديدة للدخول إلا بعد مطابقة صورة فاتورة الـ ${baseFeeSar} ريال وقبول الطلب وتفعيل السيرفر.`}
+                        <div className="relative">
+                          <KeyRound className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="password"
+                            required
+                            value={loginPassword}
+                            onChange={(e) => setLoginPassword(e.target.value)}
+                            placeholder="••••••••"
+                            className="w-full min-h-[44px] pr-9 pl-3.5 py-2.5 rounded-xl bg-slate-950/90 border border-slate-700 text-slate-100 focus:outline-none focus:border-amber-400"
+                          />
+                        </div>
+                        <p className="text-[11px] text-slate-400 mt-1.5">
+                          نسيت كلمة المرور؟ تواصل مع الإدارة لتعديل كلمة المرور يدويًا من لوحة الإدارة.
+                        </p>
                       </div>
 
                       <button
                         type="submit"
                         disabled={busy}
-                        className={`w-full min-h-[46px] px-5 py-3 rounded-xl font-bold text-sm shadow-lg transition-colors ${
-                          !busy
-                            ? 'bg-[#1D4ED8] hover:bg-blue-600 text-white'
-                            : 'bg-slate-800 text-slate-400 border border-slate-700 cursor-not-allowed'
-                        }`}
+                        className="w-full min-h-[46px] px-5 py-3 rounded-xl font-bold text-sm shadow-lg transition-colors bg-[#1D4ED8] hover:bg-blue-600 disabled:opacity-60 text-white"
                       >
-                        {busy ? 'جارٍ الدخول...' : 'دخول إلى عاصمة القيادة'}
+                        {busy ? 'جارٍ التحقق والدخول...' : 'دخول إلى الحساب'}
                       </button>
                     </form>
                   )}

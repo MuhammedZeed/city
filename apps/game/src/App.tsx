@@ -15,7 +15,10 @@ import { BuildCatalogView } from './components/BuildCatalogView';
 import { RealisticCityCanvas } from './components/RealisticCityCanvas';
 import { MilitaryView, ResearchView } from './components/MilitaryAndResearchViews';
 import { PlotInspectorPanel } from './components/PlotInspectorPanel';
-import { PlayerAuthScreen } from './components/PlayerAuthScreen';
+import {
+  PlayerAuthScreen,
+  PlayerRegisterPayload,
+} from './components/PlayerAuthScreen';
 import {
   AlliancesView,
   MarketView,
@@ -28,13 +31,29 @@ import { SidebarNav } from './components/SidebarNav';
 import { SupportView } from './components/SupportView';
 import { TopHud } from './components/TopHud';
 import { WorldMapView } from './components/WorldMapView';
-import { CITY_PLOTS, SMART_BOT_PLANS } from '@enginora/shared';
+import {
+  API_ENDPOINTS,
+  ApiClientError,
+  AuthSessionResponse,
+  CITY_PLOTS,
+  GameConfigResponse,
+  GameStateSyncResponse,
+  MigrateLocalResponse,
+  SMART_BOT_PLANS,
+  apiRequest,
+  createInitialState,
+  hydrateLoadedState,
+  newReceiptId,
+  readLegacyLocalState,
+  resolveApiBaseUrl,
+  stripInlineReceiptPreviews,
+  uploadReceiptImage,
+} from '@enginora/shared';
 import {
   StrategicPlanStep,
   runSmartStrategyCycle,
 } from './engine/advisorEngine';
 import {
-  RegistrationSubmitPayload,
   advanceGameState,
   applySpeedUpToBuild,
   applySpeedUpToResearch,
@@ -47,7 +66,6 @@ import {
   cancelPendingMarketBuy,
   claimMonthlyRewardDay,
   claimQuest,
-  clearSavedState,
   createAlliance,
   createSupportTicket,
   dispatchMaritimeTrade,
@@ -64,10 +82,8 @@ import {
   isShieldActive,
   leaveAlliance,
   linkTelegramAccount,
-  loadSavedState,
   publishMarketOffer,
   replyToSupportTicket,
-  saveGameState,
   selectCitySpecialization,
   speedUpMarchWithGems,
   startNewBuildingOnPlot,
@@ -80,21 +96,6 @@ import {
   updateTelegramAlerts,
 } from '@enginora/shared';
 import { soundFx } from './engine/soundFx';
-import {
-  apiGetConfig,
-  apiGetState,
-  apiLogin,
-  apiLogout,
-  apiRegister,
-  apiResetCity,
-  apiSaveStatePrepared,
-  ensureReceiptUploaded,
-  getStoredToken,
-  hydrateServerState,
-  mergeAuthoritative,
-  newReceiptId,
-  storeToken,
-} from './api/client';
 import {
   BotConfig,
   BuildingType,
@@ -120,8 +121,56 @@ interface PendingAttackConfirm {
   units: { infantry: number; tank: number; aircraft: number };
 }
 
+const API_BASE_URL = resolveApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
+
+function hasSubstantialLocalProgress(local: GameState): boolean {
+  const hqLevel = local.buildings.find((b) => b.type === 'hq')?.level ?? 1;
+  return (
+    local.buildings.length > 3 ||
+    hqLevel > 1 ||
+    local.buildQueue.length > 0 ||
+    local.researchQueue.length > 0 ||
+    local.trainingQueue.length > 0 ||
+    local.paymentOrders.length > 0 ||
+    local.supportTickets.length > 0 ||
+    local.maritime.cargoShips + local.maritime.surveyVessels > 0
+  );
+}
+
+function mergeAuthoritativeServerFields(
+  local: GameState,
+  server: GameState
+): GameState {
+  return {
+    ...local,
+    accountId: server.accountId,
+    adminConfig: server.adminConfig,
+    selectedServerId: server.selectedServerId ?? local.selectedServerId,
+    registration: server.registration,
+    paymentOrders: server.paymentOrders,
+    gemLedger: server.gemLedger,
+    ledger: {
+      ...local.ledger,
+      paidGems: server.ledger?.paidGems ?? local.ledger.paidGems,
+    },
+    hakimSubscription: server.hakimSubscription,
+    vipSubscription: server.vipSubscription,
+    smartBotActive: server.smartBotActive,
+    smartBotExpiresAt: server.smartBotExpiresAt,
+    supportTickets: server.supportTickets,
+    financialLogs: server.financialLogs,
+    adminAuditLogs: server.adminAuditLogs,
+    market: {
+      ...local.market,
+      marketFrozenForPlayer: server.market?.marketFrozenForPlayer,
+      marketBanUntil: server.market?.marketBanUntil,
+      playerInternalDebtGems: server.market?.playerInternalDebtGems ?? 0,
+    },
+  };
+}
+
 export default function App() {
-  const [state, setState] = useState<GameState>(() => loadSavedState());
+  const [state, setState] = useState<GameState>(() => createInitialState());
   const [now, setNow] = useState<number>(() => Date.now());
   const [activeSection, setActiveSection] = useState<NavSection>('city');
   const [selectedPlotId, setSelectedPlotId] = useState<string | null>(null);
@@ -129,16 +178,21 @@ export default function App() {
   const [showBotModal, setShowBotModal] = useState(false);
   const [botModalTab, setBotModalTab] = useState<AdvisorModalTab>('qa');
   const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [sessionAuthenticated, setSessionAuthenticated] = useState<boolean>(false);
-  const [apiToken, setApiToken] = useState<string | null>(() => getStoredToken());
-  const [restoring, setRestoring] = useState<boolean>(() => Boolean(getStoredToken()));
-  const revisionRef = useRef<number>(0);
-  const stateRef = useRef<GameState>(state);
-  const savingRef = useRef<boolean>(false);
-  const flushRef = useRef<() => Promise<void>>(async () => {});
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [isSyncBusy, setIsSyncBusy] = useState(false);
   const [shieldConfirmAttack, setShieldConfirmAttack] =
     useState<PendingAttackConfirm | null>(null);
   const [toast, setToast] = useState<ToastMessage | null>(null);
+
+  const stateRef = useRef<GameState>(state);
+  stateRef.current = state;
+  const authTokenRef = useRef<string | null>(authToken);
+  authTokenRef.current = authToken;
+  const serverRevisionRef = useRef<number>(1);
+  const dirtyRef = useRef<boolean>(false);
+  const syncInFlightRef = useRef<boolean>(false);
+  const debounceTimerRef = useRef<number | null>(null);
+
   const pushToast = useCallback(
     (text: string, tone: ToastMessage['tone'] = 'info') => {
       const id = Date.now();
@@ -150,138 +204,196 @@ export default function App() {
     []
   );
 
-  useEffect(() => {
-    stateRef.current = state;
-  }, [state]);
+  const syncStateToServer = useCallback(
+    async (opts?: { keepalive?: boolean; overrideState?: GameState }) => {
+      const token = authTokenRef.current;
+      if (!token) return false;
+      if (syncInFlightRef.current && !opts?.keepalive) return false;
 
-  // Restore an existing server session on page load
-  useEffect(() => {
-    const token = getStoredToken();
-    if (!token) {
-      setRestoring(false);
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      const r = await apiGetState(token);
-      if (cancelled) return;
-      if (r.ok && r.data.state) {
-        revisionRef.current = Number(r.data.revision) || 0;
-        const hydrated = hydrateServerState(r.data.state);
-        setState(hydrated);
-        setApiToken(token);
-        if (hydrated.registration.status === 'approved') setSessionAuthenticated(true);
-      } else if (r.status === 401) {
-        storeToken(null);
-        setApiToken(null);
-      }
-      setRestoring(false);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // While waiting for founder approval, check the server every 20 seconds
-  useEffect(() => {
-    if (!apiToken || sessionAuthenticated) return;
-    const id = window.setInterval(async () => {
-      const r = await apiGetState(apiToken);
-      if (r.ok && r.data.state) {
-        revisionRef.current = Number(r.data.revision) || revisionRef.current;
-        const hydrated = hydrateServerState(r.data.state);
-        setState(hydrated);
-        if (hydrated.registration.status === 'approved') {
-          setSessionAuthenticated(true);
-          pushToast('تم اعتماد حسابك! أهلاً بك في ENGINORA CITY.', 'success');
-        }
-      } else if (r.status === 401) {
-        storeToken(null);
-        setApiToken(null);
-      }
-    }, 20000);
-    return () => window.clearInterval(id);
-  }, [apiToken, sessionAuthenticated, pushToast]);
-
-  // Before login: always show the real server status (open/closed) from the API
-  useEffect(() => {
-    if (sessionAuthenticated) return;
-    let cancelled = false;
-    const loadConfig = async () => {
-      const r = await apiGetConfig();
-      if (cancelled || !r.ok || !Array.isArray(r.data.servers) || r.data.servers.length === 0) {
-        return;
-      }
-      const remote = r.data.servers as GameState['adminConfig']['servers'];
-      setState((prev) => {
-        const merged = remote.map((srv) => ({
-          ...(prev.adminConfig.servers.find((x) => x.id === srv.id) ?? {}),
-          ...srv,
-        }));
-        const keepId = merged.some((x) => x.id === prev.selectedServerId)
-          ? prev.selectedServerId
-          : merged[0].id;
-        return {
-          ...prev,
-          selectedServerId: keepId,
-          adminConfig: { ...prev.adminConfig, servers: merged },
-        };
-      });
-    };
-    void loadConfig();
-    const id = window.setInterval(loadConfig, 30000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, [sessionAuthenticated]);
-
-  // Autosave to the server every 60 seconds while playing, and when the tab is hidden
-  useEffect(() => {
-    if (!apiToken || !sessionAuthenticated) {
-      flushRef.current = async () => {};
-      return;
-    }
-    const flush = async () => {
-      if (savingRef.current) return;
-      savingRef.current = true;
+      const payloadState = stripInlineReceiptPreviews(
+        opts?.overrideState ?? stateRef.current
+      );
+      syncInFlightRef.current = true;
       try {
-        const r = await apiSaveStatePrepared(apiToken, stateRef.current, revisionRef.current);
-        if (r.ok) {
-          revisionRef.current = Number(r.data.revision) || revisionRef.current;
-          setState((prev) => mergeAuthoritative(prev, r.data.state));
-        } else if (r.status === 409 && r.data.code === 'REVISION_CONFLICT') {
-          revisionRef.current = Number(r.data.serverRevision) || revisionRef.current;
-          setState(hydrateServerState(r.data.state));
-          pushToast('تم تحديث بيانات حسابك من الخادم.', 'info');
-        } else if (r.status === 401) {
-          storeToken(null);
-          setApiToken(null);
-          setSessionAuthenticated(false);
-          pushToast('انتهت جلسة الدخول، يرجى تسجيل الدخول من جديد.', 'error');
+        const res = await apiRequest<GameStateSyncResponse>(
+          API_ENDPOINTS.gameState,
+          {
+            method: 'PUT',
+            token,
+            baseUrl: API_BASE_URL,
+            keepalive: opts?.keepalive,
+            body: {
+              state: payloadState,
+              expectedRevision: serverRevisionRef.current,
+            },
+          }
+        );
+
+        serverRevisionRef.current = res.revision;
+        dirtyRef.current = false;
+        const hydrated = hydrateLoadedState(res.state, res.serverTimeUtc || Date.now());
+        setState(hydrated);
+        return true;
+      } catch (err) {
+        if (err instanceof ApiClientError) {
+          if (err.status === 409 && err.payload?.state) {
+            const srvRev = Number(err.payload.serverRevision ?? serverRevisionRef.current);
+            serverRevisionRef.current = srvRev;
+            const serverHydrated = hydrateLoadedState(
+              err.payload.state as Partial<GameState>,
+              Number(err.payload.serverTimeUtc ?? Date.now())
+            );
+            const merged = dirtyRef.current
+              ? mergeAuthoritativeServerFields(stateRef.current, serverHydrated)
+              : serverHydrated;
+            const cleanMerged = stripInlineReceiptPreviews(merged);
+            setState(cleanMerged);
+            // Try saving merged state immediately under the latest revision
+            if (dirtyRef.current && !opts?.keepalive) {
+              try {
+                const retry = await apiRequest<GameStateSyncResponse>(
+                  API_ENDPOINTS.gameState,
+                  {
+                    method: 'PUT',
+                    token,
+                    baseUrl: API_BASE_URL,
+                    body: {
+                      state: cleanMerged,
+                      expectedRevision: srvRev,
+                    },
+                  }
+                );
+                serverRevisionRef.current = retry.revision;
+                dirtyRef.current = false;
+                setState(
+                  hydrateLoadedState(retry.state, retry.serverTimeUtc || Date.now())
+                );
+                return true;
+              } catch {
+                // Next sync cycle will retry
+              }
+            }
+          } else if (err.status === 401) {
+            setAuthToken(null);
+            dirtyRef.current = false;
+            pushToast('انتهت جلسة الدخول أو تم تحديث كلمة المرور. سجل الدخول مجددًا.', 'error');
+          }
         }
+        return false;
       } finally {
-        savingRef.current = false;
+        syncInFlightRef.current = false;
+      }
+    },
+    [pushToast]
+  );
+
+  const commitState = useCallback(
+    (updater: GameState | ((prev: GameState) => GameState), immediate = false) => {
+      setState((prev) => {
+        const next =
+          typeof updater === 'function'
+            ? (updater as (p: GameState) => GameState)(prev)
+            : updater;
+        stateRef.current = next;
+        return next;
+      });
+      if (!authTokenRef.current) return;
+      dirtyRef.current = true;
+      if (debounceTimerRef.current) {
+        window.clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+      if (immediate) {
+        void syncStateToServer();
+      } else {
+        debounceTimerRef.current = window.setTimeout(() => {
+          debounceTimerRef.current = null;
+          if (dirtyRef.current) {
+            void syncStateToServer();
+          }
+        }, 1200);
+      }
+    },
+    [syncStateToServer]
+  );
+
+  const pullLatestFromServer = useCallback(async () => {
+    const token = authTokenRef.current;
+    if (!token) {
+      try {
+        const cfgRes = await apiRequest<GameConfigResponse>(
+          API_ENDPOINTS.gameConfig,
+          { baseUrl: API_BASE_URL }
+        );
+        setState((prev) => ({
+          ...prev,
+          adminConfig: cfgRes.adminConfig,
+          selectedServerId:
+            cfgRes.adminConfig.servers?.some((s) => s.id === prev.selectedServerId)
+              ? prev.selectedServerId
+              : cfgRes.adminConfig.servers?.[0]?.id ?? prev.selectedServerId,
+        }));
+      } catch {
+        // Ignore transient offline error
+      }
+      return;
+    }
+
+    if (dirtyRef.current) {
+      await syncStateToServer();
+      return;
+    }
+
+    setIsSyncBusy(true);
+    try {
+      const res = await apiRequest<GameStateSyncResponse>(
+        API_ENDPOINTS.gameState,
+        { token, baseUrl: API_BASE_URL }
+      );
+      serverRevisionRef.current = res.revision;
+      setState(hydrateLoadedState(res.state, res.serverTimeUtc || Date.now()));
+    } catch (err) {
+      if (err instanceof ApiClientError && err.status === 401) {
+        setAuthToken(null);
+        dirtyRef.current = false;
+        pushToast('انتهت الجلسة. يرجى تسجيل الدخول مجددًا.', 'error');
+      }
+    } finally {
+      setIsSyncBusy(false);
+    }
+  }, [pushToast, syncStateToServer]);
+
+  // Initial public config fetch & periodic refresh when logged out
+  useEffect(() => {
+    void pullLatestFromServer();
+    const pollMs = authToken ? 15000 : 12000;
+    const id = window.setInterval(() => {
+      void pullLatestFromServer();
+    }, pollMs);
+    return () => window.clearInterval(id);
+  }, [authToken, pullLatestFromServer]);
+
+  // Flush dirty state safely on tab hide / close
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden' && authTokenRef.current && dirtyRef.current) {
+        void syncStateToServer({ keepalive: true });
       }
     };
-    flushRef.current = flush;
-    const id = window.setInterval(flush, 60000);
-    const onVisibility = () => {
-      if (document.visibilityState === 'hidden') void flush();
+    const handlePageHide = () => {
+      if (authTokenRef.current && dirtyRef.current) {
+        void syncStateToServer({ keepalive: true });
+      }
     };
-    document.addEventListener('visibilitychange', onVisibility);
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('pagehide', handlePageHide);
     return () => {
-      window.clearInterval(id);
-      document.removeEventListener('visibilitychange', onVisibility);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('pagehide', handlePageHide);
     };
-  }, [apiToken, sessionAuthenticated, pushToast]);
+  }, [syncStateToServer]);
 
-  // Save state whenever it mutates
-  useEffect(() => {
-    saveGameState(state);
-  }, [state]);
-
-  // 1-second deterministic world tick (continues catching up offline time)
+  // 1-second deterministic world tick (local memory only; server syncs on mutations/checkpoints)
   useEffect(() => {
     const interval = window.setInterval(() => {
       const tickNow = Date.now();
@@ -336,7 +448,7 @@ export default function App() {
         pushToast(result.error, 'error');
       } else {
         soundFx.play('build', state.soundEnabled);
-        setState(result.state);
+        commitState(result.state);
         setPendingBuildType(null);
         setSelectedPlotId(plotId);
         pushToast('بدأت أعمال الإنشاء بنجاح.', 'success');
@@ -357,7 +469,7 @@ export default function App() {
       return;
     }
     soundFx.play('build', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('بدأت عملية الإنشاء وتفعيل المؤقت.', 'success');
   };
 
@@ -370,7 +482,7 @@ export default function App() {
       return;
     }
     soundFx.play('build', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('بدأت ترقية المبنى.', 'success');
   };
 
@@ -383,7 +495,7 @@ export default function App() {
       return;
     }
     soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('تم تطبيق بطاقة التسريع على البناء بنجاح.', 'success');
   };
 
@@ -396,7 +508,7 @@ export default function App() {
       return;
     }
     soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('تم تطبيق بطاقة التسريع على البحث بنجاح.', 'success');
   };
 
@@ -409,7 +521,7 @@ export default function App() {
       return;
     }
     soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('تم تطبيق بطاقة التسريع على التدريب بنجاح.', 'success');
   };
 
@@ -422,7 +534,7 @@ export default function App() {
       return;
     }
     soundFx.play('complete', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast(
       `تم الإنهاء الفوري للبناء مقابل ${res.gemCost ?? 0} جوهرة!`,
       'success'
@@ -438,7 +550,7 @@ export default function App() {
       return;
     }
     soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast(
       `تم تسريع المسيرة (${minutes} د) مقابل ${res.gemCost ?? 0} جوهرة.`,
       'success'
@@ -453,7 +565,7 @@ export default function App() {
       return;
     }
     soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('تم اعتماد التخصص الرئيسي للمدينة.', 'success');
   };
 
@@ -466,7 +578,7 @@ export default function App() {
       return;
     }
     soundFx.play('build', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('بدأ البحث التقني.', 'success');
   };
 
@@ -479,7 +591,7 @@ export default function App() {
       return;
     }
     soundFx.play('build', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast(`بدأ تدريب ${count} وحدة في الثكنة.`, 'success');
   };
 
@@ -492,7 +604,7 @@ export default function App() {
       return;
     }
     soundFx.play('build', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('انطلقت حملة الاستطلاع وفق مؤقت الحركة (درعك ما زال محميًا).', 'success');
   };
 
@@ -508,7 +620,7 @@ export default function App() {
       return;
     }
     soundFx.play('build', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast(
       res.shieldCancelled
         ? 'انطلقت الحملة العسكرية وتم إلغاء درع الحماية فورًا.'
@@ -537,7 +649,7 @@ export default function App() {
       return;
     }
     soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('تم استلام مكافأة المهمة!', 'success');
   };
 
@@ -549,7 +661,7 @@ export default function App() {
       return;
     }
     soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast(`تم استلام مكافأة اليوم ${day} من الباقة الشهرية!`, 'success');
   };
 
@@ -563,7 +675,7 @@ export default function App() {
   const handleToggleSmartBot = () => {
     const currentNow = Date.now();
     const activating = !state.smartBotActive;
-    setState((prev) => {
+    commitState((prev) => {
       const nextActivating = !prev.smartBotActive;
       const baseNext: GameState = {
         ...prev,
@@ -602,7 +714,7 @@ export default function App() {
       return;
     }
     soundFx.play('build', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast(
       vesselType === 'cargo_ship'
         ? 'تم تدشين سفينة شحن تجارية جديدة بالميناء.'
@@ -619,7 +731,7 @@ export default function App() {
       return;
     }
     soundFx.play('build', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('أبحرت قافلة التجارة البحرية من الميناء.', 'success');
   };
 
@@ -631,13 +743,13 @@ export default function App() {
       return;
     }
     soundFx.play('build', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('انطلقت بعثة المسح السيزمي لاستكشاف النفط والغاز.', 'success');
   };
 
   const handleUpdateBotConfig = (patch: Partial<BotConfig>) => {
     const nowTs = Date.now();
-    setState((prev) => {
+    commitState((prev) => {
       const isAdoptingPlan = Boolean(patch.planId && patch.planId !== prev.botConfig.planId);
       const shouldAutoStart =
         prev.smartBotActive &&
@@ -679,7 +791,7 @@ export default function App() {
       return;
     }
     soundFx.play('build', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast(res.summary ?? 'تم تنفيذ خطوة الخطة الاستراتيجية.', 'success');
   };
 
@@ -691,7 +803,7 @@ export default function App() {
       return;
     }
     soundFx.play('build', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast(res.summary ?? 'انطلقت حملة حقول الموارد المفوضة.', 'success');
   };
 
@@ -703,7 +815,7 @@ export default function App() {
       return;
     }
     soundFx.play('build', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast(res.actionsTaken.join(' · '), 'success');
   };
 
@@ -716,7 +828,7 @@ export default function App() {
       return;
     }
     soundFx.play('build', state.soundEnabled);
-    setState({
+    commitState({
       ...res.state,
       botConfig: {
         ...res.state.botConfig,
@@ -728,7 +840,7 @@ export default function App() {
   };
 
   // Store & Payment Handlers
-  const handleSubmitPaymentOrder = (
+  const handleSubmitPaymentOrder = async (
     productType: OrderProductType,
     productId: string,
     paymentMethod: PaymentMethodId,
@@ -736,23 +848,42 @@ export default function App() {
     receiptName?: string,
     receiptPreviewUrl?: string
   ) => {
+    let uploadedReceiptId: string | undefined;
+    if (
+      authTokenRef.current &&
+      receiptPreviewUrl &&
+      receiptPreviewUrl.startsWith('data:image/')
+    ) {
+      const candidateId = newReceiptId();
+      const ok = await uploadReceiptImage(
+        authTokenRef.current,
+        candidateId,
+        receiptPreviewUrl,
+        API_BASE_URL
+      );
+      if (ok) {
+        uploadedReceiptId = candidateId;
+      }
+    }
+
     const res = submitPaymentOrder(
-      state,
+      stateRef.current,
       productType,
       productId,
       paymentMethod,
       transferRef,
       receiptName,
-      receiptPreviewUrl,
-      Date.now()
+      uploadedReceiptId ? undefined : receiptPreviewUrl,
+      Date.now(),
+      uploadedReceiptId
     );
     if (res.error) {
-      soundFx.play('error', state.soundEnabled);
+      soundFx.play('error', stateRef.current.soundEnabled);
       pushToast(res.error, 'error');
       return;
     }
-    soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
+    soundFx.play('claim', stateRef.current.soundEnabled);
+    commitState(stripInlineReceiptPreviews(res.state), true);
     pushToast(
       `تم إرسال طلب الدفع ${res.order?.id ?? ''} بحالة «قيد المراجعة» بانتظار اعتماد المؤسس.`,
       'success'
@@ -767,7 +898,7 @@ export default function App() {
       return;
     }
     soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('تم شراء بطاقة التسريع وإضافتها لحسابك.', 'success');
   };
 
@@ -779,7 +910,7 @@ export default function App() {
       return;
     }
     soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast(
       kind === 'attack'
         ? 'تم تفعيل / تمديد تعزيز الهجوم +10% (24 ساعة).'
@@ -796,7 +927,7 @@ export default function App() {
       return;
     }
     soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('تم تفعيل / تمديد درع الحماية لمدينتك.', 'success');
   };
 
@@ -813,7 +944,7 @@ export default function App() {
       return;
     }
     soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('تم نشر عرض البيع في السوق لمدة 7 أيام.', 'success');
   };
 
@@ -825,7 +956,7 @@ export default function App() {
       return;
     }
     soundFx.play('click', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('تم تعديل سعر العرض في السوق.', 'success');
   };
 
@@ -837,7 +968,7 @@ export default function App() {
       return;
     }
     soundFx.play('click', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('تم إلغاء العرض وإعادة الكمية المتبقية لمدينتك.', 'info');
   };
 
@@ -849,7 +980,7 @@ export default function App() {
       return;
     }
     soundFx.play('click', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('بدأ عداد التأكيد (5 ثوانٍ) — يمكنك الإلغاء مجانًا قبل الاعتماد.', 'info');
   };
 
@@ -861,7 +992,7 @@ export default function App() {
       return;
     }
     soundFx.play('click', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('تم إلغاء طلب الشراء وإعادة الكمية للعرض.', 'info');
   };
 
@@ -873,7 +1004,7 @@ export default function App() {
       return;
     }
     soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('تم تنفيذ صفقة الشراء وتسجيلها في السجل التجاري.', 'success');
   };
 
@@ -886,13 +1017,13 @@ export default function App() {
       return;
     }
     soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('تم تأسيس التحالف الجديد مجانًا (الحد الأقصى 10 أعضاء).', 'success');
   };
 
   const handleLeaveAlliance = () => {
     soundFx.play('click', state.soundEnabled);
-    setState((prev) => leaveAlliance(prev));
+    commitState((prev) => leaveAlliance(prev));
     pushToast('تمت مغادرة التحالف.', 'info');
   };
 
@@ -917,7 +1048,7 @@ export default function App() {
       return;
     }
     soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast(`تم فتح تذكرة الدعم ${res.ticket?.id ?? ''} بنجاح.`, 'success');
   };
 
@@ -940,12 +1071,12 @@ export default function App() {
       return;
     }
     soundFx.play('click', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('تم إرسال ردك إلى فريق الدعم.', 'success');
   };
 
   const handleMarkTicketRead = (ticketId: string) => {
-    setState((prev) => ({
+    commitState((prev) => ({
       ...prev,
       supportTickets: prev.supportTickets.map((t) =>
         t.id === ticketId ? { ...t, unreadByPlayer: false } : t
@@ -957,7 +1088,7 @@ export default function App() {
   // Telegram Linking Handlers
   const handleGenerateTelegramCode = () => {
     soundFx.play('click', state.soundEnabled);
-    setState((prev) => generateTelegramCode(prev, Date.now()));
+    commitState((prev) => generateTelegramCode(prev, Date.now()));
     pushToast('تم توليد كود ربط تيليغرام المؤقت لمدة 15 دقيقة.', 'success');
   };
 
@@ -969,13 +1100,13 @@ export default function App() {
       return;
     }
     soundFx.play('claim', state.soundEnabled);
-    setState(res.state);
+    commitState(res.state);
     pushToast('تم ربط حساب تيليغرام بنجاح وتفعيل التنبيهات الفورية.', 'success');
   };
 
   const handleUnlinkTelegram = () => {
     soundFx.play('click', state.soundEnabled);
-    setState((prev) => unlinkTelegramAccount(prev));
+    commitState((prev) => unlinkTelegramAccount(prev));
     pushToast('تم فك ربط حساب تيليغرام.', 'info');
   };
 
@@ -983,7 +1114,7 @@ export default function App() {
     patch: Partial<GameState['telegram']['alerts']>
   ) => {
     soundFx.play('click', state.soundEnabled);
-    setState((prev) => updateTelegramAlerts(prev, patch));
+    commitState((prev) => updateTelegramAlerts(prev, patch));
   };
 
   const handleOpenAdvisorHub = (tab: AdvisorModalTab) => {
@@ -1000,83 +1131,141 @@ export default function App() {
     }
   };
 
-  const applySession = (token: string, serverState: unknown, revision: unknown, fallback?: GameState) => {
-    storeToken(token);
-    setApiToken(token);
-    revisionRef.current = Number(revision) || 0;
-    const hydrated = hydrateServerState(serverState, fallback);
-    setState(hydrated);
-    return hydrated;
-  };
-
   const handleSubmitRegistration = async (
-    payload: RegistrationSubmitPayload & { password: string }
+    payload: PlayerRegisterPayload
   ): Promise<{ error?: string }> => {
-    const { password, ...regPayload } = payload;
-    if (apiToken) {
-      return {
-        error: 'لديك حساب مسجل بالفعل. تواصل مع الإدارة إذا تم رفض طلبك السابق.',
-      };
-    }
-    if (typeof password !== 'string' || password.length < 8) {
-      return { error: 'كلمة المرور يجب أن تكون 8 أحرف أو أرقام على الأقل.' };
-    }
-    const res = submitPlayerRegistration(state, regPayload, Date.now());
+    const currentNow = Date.now();
+    const hasInlineReceipt = Boolean(
+      payload.receiptPreviewUrl && payload.receiptPreviewUrl.startsWith('data:image/')
+    );
+    const candidateReceiptId = hasInlineReceipt
+      ? newReceiptId()
+      : payload.receiptId;
+
+    const res = submitPlayerRegistration(
+      state,
+      { ...payload, receiptId: candidateReceiptId },
+      currentNow
+    );
     if (res.error) {
       soundFx.play('error', state.soundEnabled);
       return { error: res.error };
     }
-    const receiptId = newReceiptId();
-    const dataUrl = res.state.registration.receiptPreviewUrl ?? '';
-    const local: GameState = {
-      ...res.state,
-      registration: { ...res.state.registration, receiptId } as GameState['registration'],
-      paymentOrders: res.state.paymentOrders.map((o) =>
-        o.productType === 'registration_fee' ? ({ ...o, receiptId } as typeof o) : o
-      ),
-    };
-    // The receipt photo is uploaded separately as an image; keep the save payload small
-    const regForServer: Record<string, unknown> = { ...local.registration };
-    delete regForServer.receiptPreviewUrl;
-    const ordersForServer = local.paymentOrders.map((o) => {
-      const copy: Record<string, unknown> = { ...o };
-      delete copy.receiptPreviewUrl;
-      return copy;
-    });
-    const r = await apiRegister({
-      email: regPayload.email.trim(),
-      phone: regPayload.phone.trim(),
-      password,
-      commanderName: regPayload.nickname.trim(),
-      serverId: local.selectedServerId,
-      registration: regForServer,
-      paymentOrders: ordersForServer,
-    });
-    if (!r.ok) {
-      soundFx.play('error', state.soundEnabled);
-      return { error: r.error ?? 'تعذر إنشاء الحساب.' };
+
+    // Logged-in user resubmitting rejected/pending registration data & receipt
+    if (authTokenRef.current) {
+      setIsSyncBusy(true);
+      try {
+        let uploadOk = false;
+        if (hasInlineReceipt && candidateReceiptId && payload.receiptPreviewUrl) {
+          uploadOk = await uploadReceiptImage(
+            authTokenRef.current,
+            candidateReceiptId,
+            payload.receiptPreviewUrl,
+            API_BASE_URL
+          );
+        }
+        const nextStateForServer = uploadOk
+          ? stripInlineReceiptPreviews(res.state)
+          : {
+              ...res.state,
+              registration: {
+                ...res.state.registration,
+                receiptId: hasInlineReceipt ? undefined : res.state.registration.receiptId,
+              },
+              paymentOrders: res.state.paymentOrders.map((o) =>
+                o.productType === 'registration_fee' && hasInlineReceipt
+                  ? { ...o, receiptId: undefined }
+                  : o
+              ),
+            };
+        const synced = await syncStateToServer({ overrideState: nextStateForServer });
+        if (!synced) {
+          return { error: 'تعذر تحديث الطلب على الخادم، يرجى المحاولة مرة أخرى.' };
+        }
+        soundFx.play('claim', state.soundEnabled);
+        pushToast('تم تحديث طلب التسجيل وإرساله للمراجعة في قاعدة البيانات.', 'success');
+        return {};
+      } finally {
+        setIsSyncBusy(false);
+      }
     }
-    if (!r.data.token) {
+
+    if (!payload.password || payload.password.length < 8) {
+      return { error: 'كلمة المرور يجب أن تكون 8 أحرف أو أرقام على الأقل.' };
+    }
+
+    const leanStateForRegister = stripInlineReceiptPreviews(res.state);
+
+    try {
+      const authRes = await apiRequest<AuthSessionResponse>(
+        API_ENDPOINTS.authRegister,
+        {
+          method: 'POST',
+          baseUrl: API_BASE_URL,
+          body: {
+            email: payload.email,
+            phone: payload.phone,
+            password: payload.password,
+            commanderName: payload.nickname,
+            nickname: payload.nickname,
+            serverId: payload.serverId ?? state.selectedServerId,
+            registration: leanStateForRegister.registration,
+            paymentOrders: leanStateForRegister.paymentOrders,
+          },
+        }
+      );
+
+      serverRevisionRef.current = authRes.revision;
+      dirtyRef.current = false;
+      setAuthToken(authRes.token);
+      authTokenRef.current = authRes.token;
+
+      let uploadedOk = true;
+      if (hasInlineReceipt && candidateReceiptId && payload.receiptPreviewUrl) {
+        uploadedOk = await uploadReceiptImage(
+          authRes.token,
+          candidateReceiptId,
+          payload.receiptPreviewUrl,
+          API_BASE_URL
+        );
+      }
+
+      const hydrated = hydrateLoadedState(
+        authRes.state,
+        authRes.serverTimeUtc || currentNow
+      );
+      setState(hydrated);
+
+      if (!uploadedOk && payload.receiptPreviewUrl) {
+        // Fallback so receipt is never lost if /api/receipts transiently failed
+        await syncStateToServer({
+          overrideState: {
+            ...hydrated,
+            registration: {
+              ...hydrated.registration,
+              receiptId: undefined,
+              receiptPreviewUrl: payload.receiptPreviewUrl,
+            },
+          },
+        });
+      }
+
+      soundFx.play('claim', state.soundEnabled);
+      pushToast(
+        `تم إنشاء الحساب (${authRes.accountId}) وإرسال فاتورتك للمراجعة من الإدارة.`,
+        'success'
+      );
+      return {};
+    } catch (err) {
+      soundFx.play('error', state.soundEnabled);
       return {
         error:
-          r.data.message ||
-          'تم إنشاء الحساب لكن لا يمكن الدخول قبل تأكيد البريد الإلكتروني.',
+          err instanceof Error
+            ? err.message
+            : 'تعذر إرسال طلب التسجيل إلى الخادم حاليًا.',
       };
     }
-    const hydrated = applySession(r.data.token, r.data.state, r.data.revision, local);
-    const uploaded = dataUrl
-      ? await ensureReceiptUploaded(r.data.token, receiptId, dataUrl)
-      : 'ok';
-    // Make sure the server has the pending registration + payment order right away
-    const saved = await apiSaveStatePrepared(r.data.token, hydrated, revisionRef.current);
-    if (saved.ok) revisionRef.current = Number(saved.data.revision) || revisionRef.current;
-    if (uploaded !== 'ok') {
-      pushToast('تم إنشاء الحساب لكن تعذر رفع صورة الفاتورة، تواصل مع الإدارة.', 'error');
-      return {};
-    }
-    soundFx.play('claim', state.soundEnabled);
-    pushToast('تم استلام طلب تسجيلك وفاتورة الـ 200 ريال وبانتظار اعتماد المؤسس.', 'success');
-    return {};
   };
 
   const activeServer =
@@ -1086,7 +1275,7 @@ export default function App() {
 
   const handleSelectServer = (serverId: string) => {
     soundFx.play('click', state.soundEnabled);
-    setState((prev) => ({
+    commitState((prev) => ({
       ...prev,
       selectedServerId: serverId,
     }));
@@ -1098,97 +1287,170 @@ export default function App() {
   ): Promise<{ error?: string }> => {
     const clean = identifier.trim();
     if (!clean || !password) {
-      return { error: 'أدخل البريد الإلكتروني أو رقم الجوال وكلمة المرور.' };
+      return { error: 'أدخل البريد الإلكتروني أو رقم الجوال أو معرّف الحساب وكلمة المرور.' };
     }
-    const r = await apiLogin(clean, password);
-    if (!r.ok || !r.data.token) {
-      soundFx.play('error', state.soundEnabled);
-      return { error: r.error ?? 'بيانات الدخول غير صحيحة.' };
-    }
-    const hydrated = applySession(r.data.token, r.data.state, r.data.revision);
-    if (hydrated.registration.status !== 'approved') {
-      pushToast(
-        hydrated.registration.status === 'pending'
-          ? 'طلب تسجيلك قيد المراجعة من المؤسس. سيتم إدخالك تلقائيًا فور الاعتماد.'
-          : 'هذا الحساب غير معتمد بعد.',
-        'info'
+
+    try {
+      const loginRes = await apiRequest<AuthSessionResponse>(
+        API_ENDPOINTS.authLogin,
+        {
+          method: 'POST',
+          baseUrl: API_BASE_URL,
+          body: { identifier: clean, password },
+        }
       );
+
+      let resolvedState = hydrateLoadedState(
+        loginRes.state,
+        loginRes.serverTimeUtc || Date.now()
+      );
+      let resolvedRevision = loginRes.revision;
+
+      // One-time safe migration of pre-existing local save if server account is fresh
+      if (resolvedRevision === 1) {
+        const legacyLocal = readLegacyLocalState();
+        if (legacyLocal && hasSubstantialLocalProgress(legacyLocal)) {
+          try {
+            const migRes = await apiRequest<MigrateLocalResponse>(
+              API_ENDPOINTS.gameMigrateLocal,
+              {
+                method: 'POST',
+                token: loginRes.token,
+                baseUrl: API_BASE_URL,
+                body: { localState: legacyLocal },
+              }
+            );
+            if (migRes.migrated) {
+              resolvedRevision = migRes.revision;
+              resolvedState = hydrateLoadedState(
+                migRes.state,
+                migRes.serverTimeUtc || Date.now()
+              );
+              pushToast('تم ترحيل بيانات مدينتك السابقة إلى السحابة تلقائيًا.', 'success');
+            }
+          } catch {
+            // Non-fatal: continue with cloud state
+          }
+        }
+      }
+
+      serverRevisionRef.current = resolvedRevision;
+      dirtyRef.current = false;
+      setAuthToken(loginRes.token);
+      setState(resolvedState);
+      soundFx.play('claim', resolvedState.soundEnabled);
+
+      if (resolvedState.registration.status === 'approved') {
+        const srv =
+          resolvedState.adminConfig.servers?.find(
+            (s) => s.id === resolvedState.selectedServerId
+          ) ?? resolvedState.adminConfig.servers?.[0];
+        if (srv?.isOpen) {
+          pushToast(
+            `أهلاً بك أيها القائد ${resolvedState.registration.nickname || resolvedState.commanderName}.`,
+            'success'
+          );
+        } else {
+          pushToast('حسابك معتمد، وبانتظار فتح السيرفر من الإدارة.', 'info');
+        }
+      } else {
+        pushToast('تم تسجيل الدخول — طلبك قيد مراجعة الإدارة.', 'info');
+      }
       return {};
-    }
-    const srv =
-      hydrated.adminConfig.servers?.find((sv) => sv.id === hydrated.selectedServerId) ??
-      hydrated.adminConfig.servers?.[0];
-    if (!srv?.isOpen) {
+    } catch (err) {
+      soundFx.play('error', state.soundEnabled);
       return {
-        error: 'السيرفر مغلق حاليًا — لا يمكن الدخول إلا بعد فتح السيرفر من لوحة الإدارة.',
+        error:
+          err instanceof Error
+            ? err.message
+            : 'بيانات الدخول غير صحيحة أو تعذر الاتصال بالخادم.',
       };
     }
-    soundFx.play('claim', hydrated.soundEnabled);
-    setSessionAuthenticated(true);
-    pushToast(
-      `أهلاً بك أيها القائد ${hydrated.registration.nickname || hydrated.commanderName}.`,
-      'success'
-    );
-    return {};
-  };
-
-  const handleResetCity = async () => {
-    if (apiToken) {
-      const r = await apiResetCity(apiToken);
-      if (!r.ok) {
-        pushToast(r.error ?? 'تعذر إعادة ضبط المدينة.', 'error');
-        return;
-      }
-      applySession(apiToken, r.data.state, r.data.revision);
-    } else {
-      setState(clearSavedState());
-    }
-    setSelectedPlotId(null);
-    setPendingBuildType(null);
-    setActiveSection('city');
-    pushToast(
-      'تمت إعادة ضبط المدينة إلى البداية المتساوية (المبنى الرئيسي المستوى 1).',
-      'info'
-    );
   };
 
   const handleLogout = async () => {
-    const token = apiToken;
-    if (token) {
-      await flushRef.current();
-      await apiLogout(token);
+    const token = authTokenRef.current;
+    if (token && dirtyRef.current) {
+      await syncStateToServer();
     }
-    storeToken(null);
-    setApiToken(null);
-    setSessionAuthenticated(false);
-    setShowSettingsModal(false);
-    setState(clearSavedState());
+    if (token) {
+      try {
+        await apiRequest<{ ok: true }>(API_ENDPOINTS.authLogout, {
+          method: 'POST',
+          token,
+          baseUrl: API_BASE_URL,
+        });
+      } catch {
+        // Ignore network errors on logout
+      }
+    }
+    if (debounceTimerRef.current) {
+      window.clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    dirtyRef.current = false;
+    serverRevisionRef.current = 1;
+    setAuthToken(null);
     setSelectedPlotId(null);
     setPendingBuildType(null);
     setActiveSection('city');
+    setState((prev) => ({
+      ...createInitialState(),
+      adminConfig: prev.adminConfig,
+      selectedServerId:
+        prev.adminConfig.servers?.[0]?.id ?? prev.selectedServerId,
+    }));
+    pushToast('تم تسجيل الخروج بأمان.', 'info');
   };
 
-
-  if (restoring) {
-    return (
-      <div
-        dir="rtl"
-        className="min-h-[100dvh] w-screen bg-[#060B17] flex items-center justify-center text-amber-200 text-sm font-bold"
-      >
-        جارٍ تحميل حسابك...
-      </div>
-    );
-  }
+  const handleResetCity = async () => {
+    const token = authTokenRef.current;
+    if (!token) return;
+    setIsSyncBusy(true);
+    try {
+      const res = await apiRequest<GameStateSyncResponse>(
+        API_ENDPOINTS.gameReset,
+        {
+          method: 'POST',
+          token,
+          baseUrl: API_BASE_URL,
+        }
+      );
+      serverRevisionRef.current = res.revision;
+      dirtyRef.current = false;
+      setState(hydrateLoadedState(res.state, res.serverTimeUtc || Date.now()));
+      setSelectedPlotId(null);
+      setPendingBuildType(null);
+      setActiveSection('city');
+      pushToast(
+        'تمت إعادة ضبط المدينة إلى البداية المتساوية (المبنى الرئيسي المستوى 1) مع حفظ الجواهر والاشتراكات.',
+        'info'
+      );
+    } catch (err) {
+      pushToast(
+        err instanceof Error ? err.message : 'تعذر إعادة ضبط المدينة على الخادم.',
+        'error'
+      );
+    } finally {
+      setIsSyncBusy(false);
+    }
+  };
 
   // Player Registration, Login & Server Gate
-  if (state.registration.status !== 'approved' || !sessionAuthenticated || !isServerOpen) {
+  if (!authToken || state.registration.status !== 'approved' || !isServerOpen) {
     return (
       <div className="relative min-h-[100dvh] w-screen overflow-hidden bg-[#060B17]">
         <PlayerAuthScreen
           state={state}
+          authToken={authToken}
+          apiBaseUrl={API_BASE_URL}
+          isAuthenticated={Boolean(authToken)}
+          isBusy={isSyncBusy}
           onSubmitRegistration={handleSubmitRegistration}
           onLoginApproved={handleLoginApproved}
           onSelectServer={handleSelectServer}
+          onRefreshStatus={pullLatestFromServer}
+          onLogout={authToken ? handleLogout : undefined}
         />
         {toast && (
           <div
@@ -1350,7 +1612,7 @@ export default function App() {
               <ReportsView
                 state={state}
                 onMarkAllRead={() =>
-                  setState((prev) => ({
+                  commitState((prev) => ({
                     ...prev,
                     reports: prev.reports.map((r) => ({ ...r, read: true })),
                   }))
@@ -1556,13 +1818,13 @@ export default function App() {
           now={now}
           onClose={() => setShowSettingsModal(false)}
           onUpdateProfile={(commanderName, cityName) =>
-            setState((prev) => ({ ...prev, commanderName, cityName }))
+            commitState((prev) => ({ ...prev, commanderName, cityName }))
           }
           onToggleSound={() =>
-            setState((prev) => ({ ...prev, soundEnabled: !prev.soundEnabled }))
+            commitState((prev) => ({ ...prev, soundEnabled: !prev.soundEnabled }))
           }
-          onResetCity={handleResetCity}
-          onLogout={handleLogout}
+          onResetCity={() => void handleResetCity()}
+          onLogout={() => void handleLogout()}
           onGenerateTelegramCode={handleGenerateTelegramCode}
           onLinkTelegram={handleLinkTelegram}
           onUnlinkTelegram={handleUnlinkTelegram}

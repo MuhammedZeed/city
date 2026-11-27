@@ -9,6 +9,7 @@ import {
   FlaskConical,
   Hammer,
   HelpCircle,
+  LogOut,
   MessageSquare,
   Play,
   RotateCcw,
@@ -835,11 +836,11 @@ export const SettingsModal: React.FC<{
   onUpdateProfile: (commanderName: string, cityName: string) => void;
   onToggleSound: () => void;
   onResetCity: () => void;
-  onLogout?: () => void;
   onGenerateTelegramCode?: () => void;
   onLinkTelegram?: (username: string) => void;
   onUnlinkTelegram?: () => void;
   onUpdateTelegramAlerts?: (patch: Partial<GameState['telegram']['alerts']>) => void;
+  onLogout?: () => void;
 }> = ({
   state,
   now = Date.now(),
@@ -847,11 +848,11 @@ export const SettingsModal: React.FC<{
   onUpdateProfile,
   onToggleSound,
   onResetCity,
-  onLogout,
   onGenerateTelegramCode,
   onLinkTelegram,
   onUnlinkTelegram,
   onUpdateTelegramAlerts,
+  onLogout,
 }) => {
   const [cmdName, setCmdName] = useState(state.commanderName);
   const [cityName, setCityName] = useState(state.cityName);
@@ -1060,46 +1061,52 @@ export const SettingsModal: React.FC<{
               </button>
             </div>
 
-            {onLogout && (
-              <button
-                type="button"
-                onClick={onLogout}
-                className="min-h-[42px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-semibold"
-              >
-                <span>تسجيل الخروج</span>
-              </button>
-            )}
-
-            {!confirmReset ? (
-              <button
-                type="button"
-                onClick={() => setConfirmReset(true)}
-                className="min-h-[42px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-rose-950/40 hover:bg-rose-900/50 border border-rose-700/40 text-rose-300 font-semibold"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>إعادة ضبط المدينة (المستوى 1)</span>
-              </button>
-            ) : (
-              <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {onLogout && (
                 <button
                   type="button"
                   onClick={() => {
-                    onResetCity();
+                    onLogout();
                     onClose();
                   }}
-                  className="min-h-[42px] px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold"
+                  className="min-h-[42px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-sky-200 font-semibold"
                 >
-                  تأكيد البدء من المستوى 1
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>تسجيل الخروج</span>
                 </button>
+              )}
+
+              {!confirmReset ? (
                 <button
                   type="button"
-                  onClick={() => setConfirmReset(false)}
-                  className="min-h-[42px] px-3.5 py-2 rounded-xl bg-slate-800 text-slate-300"
+                  onClick={() => setConfirmReset(true)}
+                  className="min-h-[42px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-rose-950/40 hover:bg-rose-900/50 border border-rose-700/40 text-rose-300 font-semibold"
                 >
-                  إلغاء
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>إعادة ضبط المدينة (المستوى 1)</span>
                 </button>
-              </div>
-            )}
+              ) : (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onResetCity();
+                      onClose();
+                    }}
+                    className="min-h-[42px] px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold"
+                  >
+                    تأكيد البدء من المستوى 1
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmReset(false)}
+                    className="min-h-[42px] px-3.5 py-2 rounded-xl bg-slate-800 text-slate-300"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>
