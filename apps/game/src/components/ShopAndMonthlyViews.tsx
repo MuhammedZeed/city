@@ -43,6 +43,7 @@ import {
 } from '@enginora/shared';
 import { LegalPoliciesModal } from './LegalPoliciesModal';
 import { PanelHeader } from '@enginora/shared';
+import { PaymentDestinationCard } from './PaymentDestinationCard';
 
 interface StoreViewProps {
   state: GameState;
@@ -54,7 +55,7 @@ interface StoreViewProps {
     transferRef: string,
     receiptName?: string,
     receiptPreviewUrl?: string
-  ) => void;
+  ) => Promise<{ error?: string } | void> | { error?: string } | void;
   onBuySpeedUpCard: (tierId: SpeedUpTierId, qty: number) => void;
   onBuyCombatBuff: (kind: 'attack' | 'defense') => void;
   onBuyProtectionShield: (tier: '24h' | '3d' | '7d' | '30d') => void;
@@ -84,6 +85,7 @@ export const StoreView: React.FC<StoreViewProps> = ({
   const [receiptName, setReceiptName] = useState<string | undefined>(undefined);
   const [receiptPreviewUrl, setReceiptPreviewUrl] = useState<string | undefined>(undefined);
   const [receiptError, setReceiptError] = useState<string | null>(null);
+  const [submittingOrder, setSubmittingOrder] = useState(false);
   const [showPoliciesModal, setShowPoliciesModal] = useState(false);
   const [speedUpQtys, setSpeedUpQtys] = useState<Record<SpeedUpTierId, number>>({
     '1m': 1,
@@ -133,9 +135,9 @@ export const StoreView: React.FC<StoreViewProps> = ({
       });
   };
 
-  const submitCheckout = (e: React.FormEvent) => {
+  const submitCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!checkout) return;
+    if (!checkout || submittingOrder) return;
     if (enabledPaymentMethods.length === 0) {
       setReceiptError('جميع وسائل الدفع متوقفة مؤقتًا من الإدارة.');
       return;
@@ -148,19 +150,29 @@ export const StoreView: React.FC<StoreViewProps> = ({
       );
       return;
     }
-    onSubmitPaymentOrder(
-      checkout.productType,
-      checkout.productId,
-      activePayMethod,
-      transferRef,
-      receiptName,
-      receiptPreviewUrl
-    );
-    setCheckout(null);
-    setTransferRef('');
-    setReceiptName(undefined);
-    setReceiptPreviewUrl(undefined);
     setReceiptError(null);
+    setSubmittingOrder(true);
+    try {
+      const result = await onSubmitPaymentOrder(
+        checkout.productType,
+        checkout.productId,
+        activePayMethod,
+        transferRef,
+        receiptName,
+        receiptPreviewUrl
+      );
+      if (result && typeof result === 'object' && 'error' in result && result.error) {
+        setReceiptError(result.error);
+        return;
+      }
+      setCheckout(null);
+      setTransferRef('');
+      setReceiptName(undefined);
+      setReceiptPreviewUrl(undefined);
+      setReceiptError(null);
+    } finally {
+      setSubmittingOrder(false);
+    }
   };
 
   const orderStatusBadge = (status: GameState['paymentOrders'][number]['status']) => {
@@ -280,7 +292,7 @@ export const StoreView: React.FC<StoreViewProps> = ({
                     رصيد نقاط التجارة (دفتر منفصل تمامًا)
                   </div>
                   <div className="text-[11px] text-slate-400">
-                    لا يُدمج أبدًا مع ENGINORA GEMS · السعر المرجعي العام: 10,000 نقطة = 1 دولار (3.75 ريال)
+                    لا يُدمج أبدًا مع ENGINORA GEMS · يُكتسب حصريًا من مبيعات الموارد في السوق الرسمي
                   </div>
                 </div>
               </div>
@@ -290,7 +302,7 @@ export const StoreView: React.FC<StoreViewProps> = ({
             </div>
 
             <div className="glass-subpanel px-3 py-2 rounded-xl text-[11px] text-slate-300 leading-relaxed">
-              حالة النظام: معدلات كسب النقاط (مبيعات السوق، مبنى نقاط التجارة عند المستوى 30، التحالفات، الفعاليات الأسبوعية) وآلية السحب النقدي مؤجلة حاليًا قيد التصميم والاعتماد النهائي من المؤسس.
+              تُحتسب نقاط التجارة وفق مبيعات الموارد الأساسية في سوق التجارة (بدءًا من المبنى الرئيسي مستوى 10) دون احتساب موارد النفط والغاز أو الإمدادات البحرية، وتبقى مفصولة تمامًا عن محفظة الجواهر.
             </div>
           </div>
         </div>
@@ -521,6 +533,12 @@ export const StoreView: React.FC<StoreViewProps> = ({
                   </div>
                 )}
 
+                <PaymentDestinationCard
+                  methodId={activePayMethod}
+                  config={state.adminConfig.paymentMethods?.[activePayMethod]}
+                  amountSar={checkoutDiscount.finalSar}
+                />
+
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-slate-300 mb-1.5">
@@ -587,10 +605,12 @@ export const StoreView: React.FC<StoreViewProps> = ({
 
                 <button
                   type="submit"
-                  disabled={enabledPaymentMethods.length === 0}
+                  disabled={enabledPaymentMethods.length === 0 || submittingOrder}
                   className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold transition-colors"
                 >
-                  إرسال الطلب والفاتورة للمراجعة ({checkoutDiscount.finalSar} ريال)
+                  {submittingOrder
+                    ? 'جارٍ إرسال الطلب وحفظه في قاعدة البيانات...'
+                    : `إرسال الطلب والفاتورة للمراجعة (${checkoutDiscount.finalSar} ريال)`}
                 </button>
               </form>
             )}

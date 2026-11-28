@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Anchor,
@@ -19,6 +19,7 @@ import {
   Pencil,
   Pickaxe,
   PlusCircle,
+  RefreshCw,
   Scale,
   Search,
   Shield,
@@ -36,6 +37,7 @@ import {
 } from 'lucide-react';
 import {
   ALLIANCE_CENTER_UPGRADE_TABLE,
+  COOP_QUESTS_CATALOG,
   MARKET_RESOURCES_META,
   QUESTS_CATALOG,
   SEAPORT_UPGRADE_TABLE,
@@ -66,7 +68,12 @@ import {
   getTotalStoredResources,
   isQuestConditionMet,
 } from '@enginora/shared';
-import { GameReport, GameState, MarketResourceId } from '@enginora/shared';
+import {
+  CoopQuestLiveStatus,
+  GameReport,
+  GameState,
+  MarketResourceId,
+} from '@enginora/shared';
 import { PanelHeader } from '@enginora/shared';
 
 /* -------------------------------------------------------------------------- */
@@ -77,7 +84,8 @@ export const QuestsView: React.FC<{
   state: GameState;
   now?: number;
   onClaimQuest: (questId: string) => void;
-}> = ({ state, now = Date.now(), onClaimQuest }) => {
+  onOpenCoopQuests?: () => void;
+}> = ({ state, now = Date.now(), onClaimQuest, onOpenCoopQuests }) => {
   const [tab, setTab] = useState<'all' | 'daily' | 'weekly' | 'achievement'>('all');
   const filtered = QUESTS_CATALOG.filter((q) =>
     tab === 'all' ? true : q.category === tab
@@ -178,7 +186,7 @@ export const QuestsView: React.FC<{
                 نقاط التجارة (Trade Points) — دفتر منفصل عن ENGINORA GEMS
               </div>
               <p className="text-[11px] text-slate-300 leading-relaxed">
-                تُكتسب نقاط التجارة من المهام والإنجازات وتجارة الميناء، وتبقى منفصلة تمامًا عن رصيد الجواهر. معدلات الكسب النهائية ونظام الصرف قيد التصميم النهائي باعتماد المؤسس.
+                تُحتسب نقاط التجارة وفق مبيعات الموارد الأساسية في سوق التجارة (القمح والخشب والحديد) ولا تشمل تجارة الميناء أو النفط والغاز، وتبقى منفصلة تمامًا عن رصيد الجواهر.
               </p>
             </div>
           </div>
@@ -189,6 +197,29 @@ export const QuestsView: React.FC<{
             </div>
           </div>
         </div>
+
+        {onOpenCoopQuests && (
+          <div className="glass-panel p-4 rounded-2xl border-sky-500/40 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex items-start gap-2.5 min-w-0 flex-1">
+              <Users className="w-4 h-4 text-sky-300 shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <div className="font-bold text-sky-200">
+                  المهام الجماعية المشتركة للسيرفر (تُفتح من التحالفات عند المستوى 10)
+                </div>
+                <p className="text-[11px] text-slate-300 leading-relaxed">
+                  أهداف ضخمة يتعاون جميع لاعبي السيرفر على تحقيقها سويًا، وعند اكتمال الهدف يحصل كل مؤهل (المبنى الرئيسي 10 + مركز التحالف) على الجائزة.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onOpenCoopQuests}
+              className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-[#1D4ED8] hover:bg-blue-600 text-white font-bold shrink-0"
+            >
+              عرض المهام المشتركة
+            </button>
+          </div>
+        )}
 
         <div className="space-y-3">
           {filtered.map((q) => {
@@ -1193,7 +1224,9 @@ export const MarketView: React.FC<MarketViewProps> = ({
                   </div>
                   <div className="flex justify-between text-xs pt-1">
                     <span className="text-slate-300">
-                      نقاط التجارة المتوقعة ({state.adminConfig.tradePointsPer100NetGems} / 100 صافي مرجعي)
+                      {pubResource === 'crude_oil' || pubResource === 'natural_gas'
+                        ? 'نقاط التجارة (النفط والغاز خارج دفتر نقاط التجارة)'
+                        : `نقاط التجارة المتوقعة (${state.adminConfig.tradePointsPer100NetGems} / 100 صافي مرجعي)`}
                     </span>
                     <span className="font-bold text-emerald-300">
                       +{formatDecimal(publishMetrics.tradePointsEarned)} نقطة
@@ -1316,7 +1349,7 @@ const REGIONAL_ALLIANCES = [
     members: '8 / 10',
     power: 42850,
     perk: '+8% كفاءة الشحن البحري وحماية الممرات',
-    minMainLv: 3,
+    minMainLv: 10,
   },
   {
     id: 'al-2',
@@ -1326,7 +1359,7 @@ const REGIONAL_ALLIANCES = [
     members: '7 / 10',
     power: 38120,
     perk: '+6% توريد الخامات وتأمين القوافل البرية',
-    minMainLv: 3,
+    minMainLv: 10,
   },
   {
     id: 'al-3',
@@ -1336,7 +1369,7 @@ const REGIONAL_ALLIANCES = [
     members: '9 / 10',
     power: 51900,
     perk: '+10% تنسيق آبار النفط والغاز البحرية',
-    minMainLv: 5,
+    minMainLv: 10,
   },
 ];
 
@@ -1357,9 +1390,25 @@ const COUNCIL_PROPOSALS = [
   },
 ];
 
+export interface CoopQuestsViewData {
+  serverId: string;
+  serverName: string;
+  serverPlayersCount: number;
+  eligibleForCoop: boolean;
+  mainLevel: number;
+  allianceCenterLevel: number;
+  quests: CoopQuestLiveStatus[];
+}
+
 export interface AlliancesViewProps {
   state: GameState;
   now?: number;
+  initialTab?: 'directory' | 'coop_quests' | 'council' | 'treasury';
+  coopQuestsData?: CoopQuestsViewData | null;
+  coopLoading?: boolean;
+  claimingCoopQuestId?: string | null;
+  onRefreshCoopQuests?: () => void;
+  onClaimCoopQuest?: (questId: string) => void;
   onCreateAlliance?: (name: string, tag: string) => void;
   onLeaveAlliance?: () => void;
 }
@@ -1367,20 +1416,32 @@ export interface AlliancesViewProps {
 export const AlliancesView: React.FC<AlliancesViewProps> = ({
   state,
   now = Date.now(),
+  initialTab = 'directory',
+  coopQuestsData,
+  coopLoading = false,
+  claimingCoopQuestId = null,
+  onRefreshCoopQuests,
+  onClaimCoopQuest,
   onCreateAlliance,
   onLeaveAlliance,
 }) => {
-  const [tab, setTab] = useState<'directory' | 'council' | 'treasury'>('directory');
+  const [tab, setTab] = useState<'directory' | 'coop_quests' | 'council' | 'treasury'>(
+    initialTab
+  );
   const [votedProposals, setVotedProposals] = useState<Record<string, 'yes' | 'no'>>({});
   const [allianceName, setAllianceName] = useState('');
   const [allianceTag, setAllianceTag] = useState('');
+
+  useEffect(() => {
+    setTab(initialTab);
+  }, [initialTab]);
 
   const mainLv = getMainBuildingLevel(state);
   const acLv = getAllianceCenterLevel(state);
   const cityPts = getCityPoints(state);
   const embassySlots =
     ALLIANCE_CENTER_UPGRADE_TABLE.find((r) => r.level === acLv)?.embassySlots ?? 0;
-  const centerReady = mainLv >= 3 && acLv >= 1;
+  const centerReady = mainLv >= 10 && acLv >= 1;
 
   const currentAlliance = state.allianceMeta.currentAlliance;
   const cooldownMs = 30 * 24 * 60 * 60 * 1000;
@@ -1388,17 +1449,34 @@ export const AlliancesView: React.FC<AlliancesViewProps> = ({
     ? Math.max(0, cooldownMs - (now - state.allianceMeta.lastCreatedAllianceAt))
     : 0;
 
+  const fallbackCoopList: CoopQuestLiveStatus[] = useMemo(
+    () =>
+      COOP_QUESTS_CATALOG.map((q) => ({
+        quest: q,
+        currentValue: 0,
+        targetValue: q.targetValue,
+        progressPct: 0,
+        completed: false,
+        claimed: Boolean(state.coopQuestClaims?.[q.id]),
+        canClaim: false,
+        contributorsCount: 0,
+      })),
+    [state.coopQuestClaims]
+  );
+  const coopQuestsList = coopQuestsData?.quests ?? fallbackCoopList;
+
   return (
     <div className="h-full overflow-y-auto p-3.5 sm:p-6 bg-[#070D1B] bg-[radial-gradient(ellipse_at_top_right,rgba(29,78,216,0.16),transparent_48%),radial-gradient(ellipse_at_bottom_left,rgba(14,165,233,0.12),transparent_45%)]">
       <div className="max-w-6xl mx-auto space-y-5 pb-6">
         <PanelHeader
           icon={Users}
-          title="التحالفات والدبلوماسية"
-          subtitle="حد التحالف الأقصى 10 لاعبين — إنشاء التحالف الأول مجاني تمامًا مع مهلة 30 يومًا قبل تأسيس تحالف آخر."
+          title="التحالفات والمهام المشتركة"
+          subtitle="يُفتح مركز التحالف عند المبنى الرئيسي مستوى 10 — حد التحالف 10 لاعبين مع مهام جماعية مشتركة على مستوى السيرفر."
           rightSlot={
             <div className="flex items-center gap-1 p-1 rounded-xl glass-subpanel overflow-x-auto no-scrollbar max-w-full">
               {[
                 { id: 'directory', label: 'دليل وتأسيس التحالف', icon: Users },
+                { id: 'coop_quests', label: 'المهام المشتركة', icon: ClipboardCheck },
                 { id: 'council', label: 'التصويت والتنسيق', icon: Vote },
                 { id: 'treasury', label: 'الدفاع والوفود', icon: Landmark },
               ].map((t) => {
@@ -1442,8 +1520,8 @@ export const AlliancesView: React.FC<AlliancesViewProps> = ({
             <div className="space-y-0.5">
               <div className="font-bold text-sm">
                 {centerReady
-                  ? `مركز التحالف نشط (مستوى ${acLv}) — متاح ${embassySlots} مكاتب بعثات للدعم`
-                  : `تُفتح التحالفات عند المبنى الرئيسي 3 وبناء مركز التحالف (الحالي: ${mainLv} · المركز: ${acLv})`}
+                  ? `مركز التحالف نشط (مستوى ${acLv}) — متاح ${embassySlots} مكاتب بعثات للدعم والمهام المشتركة`
+                  : `تُفتح التحالفات والمهام المشتركة عند المبنى الرئيسي 10 وبناء مركز التحالف (الحالي: ${mainLv} · المركز: ${acLv})`}
               </div>
               <p className="text-slate-300/90 leading-relaxed">
                 الحد الأقصى لأعضاء التحالف الواحد هو 10 لاعبين. التأسيس الأول مجاني بالكامل مع فاصل 30 يومًا بين كل تأسيس وآخر.
@@ -1598,9 +1676,151 @@ export const AlliancesView: React.FC<AlliancesViewProps> = ({
                       ? 'ضمن فترة الـ 30 يومًا'
                       : centerReady
                         ? 'إنشاء التحالف مجانًا'
-                        : 'ابنِ مركز التحالف أولًا (رئيسي 3)'}
+                        : 'ابنِ مركز التحالف أولًا (رئيسي 10)'}
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 2: Server-Wide Cooperative Shared Quests */}
+        {tab === 'coop_quests' && (
+          <div className="space-y-4">
+            <div className="glass-panel p-4 rounded-2xl border-sky-400/40 flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="space-y-1">
+                <div className="font-bold text-sm text-sky-200 flex items-center gap-2">
+                  <ClipboardCheck className="w-4 h-4 text-amber-300" />
+                  <span>
+                    المهام التعاونية المشتركة — {coopQuestsData?.serverName ?? 'السيرفر الحالي'}
+                  </span>
+                </div>
+                <p className="text-slate-300 leading-relaxed">
+                  يُحتسب التقدم من مجموع إنجازات جميع لاعبي السيرفر ({formatNumber(coopQuestsData?.serverPlayersCount ?? 1)} قائد). عند اكتمال أي هدف جماعي يحصل كل لاعب بنى مركز التحالف (المبنى الرئيسي 10+) على الجائزة كاملة.
+                </p>
+              </div>
+              {onRefreshCoopQuests && (
+                <button
+                  type="button"
+                  disabled={coopLoading}
+                  onClick={onRefreshCoopQuests}
+                  className="min-h-[40px] px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 font-bold inline-flex items-center gap-1.5 shrink-0 disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${coopLoading ? 'animate-spin' : ''}`} />
+                  <span>{coopLoading ? 'جاري التحديث...' : 'تحديث التقدم'}</span>
+                </button>
+              )}
+            </div>
+
+            {!centerReady && (
+              <div className="p-3.5 rounded-2xl bg-amber-950/35 border border-amber-500/45 text-amber-100 text-xs flex items-center gap-2.5">
+                <Lock className="w-4 h-4 text-amber-300 shrink-0" />
+                <span>
+                  أنت تساهم بتطوير مدينتك تلقائيًا في المهام المشتركة، ولكن استلام المكافآت يُفتح بعد ترقية المبنى الرئيسي إلى المستوى 10 وبناء «مركز التحالف».
+                </span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {coopQuestsList.map((item) => {
+                const { quest } = item;
+                const isClaimingThis = claimingCoopQuestId === quest.id;
+                return (
+                  <div
+                    key={quest.id}
+                    className={`glass-panel p-5 rounded-2xl flex flex-col justify-between gap-4 text-xs transition-colors ${
+                      item.canClaim
+                        ? 'border-amber-400/70'
+                        : item.claimed
+                          ? 'border-emerald-500/45'
+                          : 'hover:border-sky-400/40'
+                    }`}
+                  >
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h3 className="text-sm sm:text-base font-bold text-slate-100">
+                          {quest.title}
+                        </h3>
+                        <span className="font-num px-2.5 py-0.5 rounded-lg glass-subpanel text-[11px] text-sky-300">
+                          المساهمون: {item.contributorsCount}
+                        </span>
+                      </div>
+
+                      <p className="text-slate-300 leading-relaxed">{quest.description}</p>
+
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between font-num text-[11px]">
+                          <span className="text-slate-400">
+                            التقدم الجماعي ({quest.unitLabel})
+                          </span>
+                          <span
+                            className={`font-bold ${
+                              item.completed ? 'text-emerald-300' : 'text-amber-300'
+                            }`}
+                          >
+                            {formatNumber(item.currentValue)} / {formatNumber(item.targetValue)} ({item.progressPct}%)
+                          </span>
+                        </div>
+                        <div className="w-full h-2.5 rounded-full bg-slate-900 overflow-hidden border border-slate-800">
+                          <div
+                            className={`h-full transition-all duration-300 ${
+                              item.completed ? 'bg-emerald-500' : 'bg-amber-400'
+                            }`}
+                            style={{ width: `${Math.min(100, item.progressPct)}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 font-num pt-1">
+                        <span className="inline-flex items-center gap-1 text-amber-300 font-semibold">
+                          <Wheat className="w-3.5 h-3.5" />+{formatNumber(quest.rewards.wheat)}
+                        </span>
+                        <span className="inline-flex items-center gap-1 text-emerald-300 font-semibold">
+                          <Trees className="w-3.5 h-3.5" />+{formatNumber(quest.rewards.wood)}
+                        </span>
+                        <span className="inline-flex items-center gap-1 text-sky-300 font-semibold">
+                          <Pickaxe className="w-3.5 h-3.5" />+{formatNumber(quest.rewards.iron)}
+                        </span>
+                        <span className="text-slate-300">
+                          +{quest.rewards.achievementPoints} نقطة إنجاز
+                        </span>
+                        {quest.rewards.speedUp && (
+                          <span className="inline-flex items-center gap-1 text-amber-200 font-semibold">
+                            <Zap className="w-3.5 h-3.5 text-amber-400" />
+                            {SPEEDUP_CARDS_META[quest.rewards.speedUp.tier].name} (×{quest.rewards.speedUp.count})
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="pt-1">
+                      {item.claimed ? (
+                        <div className="w-full min-h-[42px] px-4 py-2 rounded-xl bg-emerald-950/50 border border-emerald-500/40 text-emerald-300 font-bold flex items-center justify-center gap-1.5">
+                          <CheckCircle2 className="w-4 h-4" />
+                          <span>تم استلام مكافأة السيرفر</span>
+                        </div>
+                      ) : item.canClaim && onClaimCoopQuest ? (
+                        <button
+                          type="button"
+                          disabled={isClaimingThis}
+                          onClick={() => onClaimCoopQuest(quest.id)}
+                          className="w-full min-h-[44px] px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold transition-colors disabled:opacity-60"
+                        >
+                          {isClaimingThis ? 'جاري الصرف...' : 'استلام المكافأة المشتركة'}
+                        </button>
+                      ) : item.completed && !centerReady ? (
+                        <div className="w-full min-h-[42px] px-4 py-2 rounded-xl bg-slate-900/80 border border-slate-700 text-amber-200 font-bold flex items-center justify-center gap-1.5">
+                          <Lock className="w-4 h-4 text-amber-300" />
+                          <span>مكتمل — يتطلب رئيسي 10 ومركز التحالف للاستلام</span>
+                        </div>
+                      ) : (
+                        <div className="w-full min-h-[42px] px-4 py-2 rounded-xl bg-slate-800/75 text-slate-400 font-bold flex items-center justify-center">
+                          قيد الإنجاز الجماعي في السيرفر
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}

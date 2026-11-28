@@ -21,6 +21,7 @@ import {
 } from './components/PlayerAuthScreen';
 import {
   AlliancesView,
+  CoopQuestsViewData,
   MarketView,
   QuestsView,
   ReportsView,
@@ -36,7 +37,10 @@ import {
   ApiClientError,
   AuthSessionResponse,
   CITY_PLOTS,
+  CoopQuestClaimResponse,
+  CoopQuestsStatusResponse,
   GameConfigResponse,
+  GamePaymentOrderResponse,
   GameStateSyncResponse,
   MigrateLocalResponse,
   SMART_BOT_PLANS,
@@ -141,13 +145,18 @@ function mergeAuthoritativeServerFields(
   local: GameState,
   server: GameState
 ): GameState {
+  const serverOrders = server.paymentOrders ?? [];
+  const serverOrderIds = new Set(serverOrders.map((o) => o.id));
+  const localPendingOrders = (local.paymentOrders ?? []).filter(
+    (o) => o.status === 'pending' && !serverOrderIds.has(o.id)
+  );
   return {
     ...local,
     accountId: server.accountId,
     adminConfig: server.adminConfig,
     selectedServerId: server.selectedServerId ?? local.selectedServerId,
     registration: server.registration,
-    paymentOrders: server.paymentOrders,
+    paymentOrders: [...localPendingOrders, ...serverOrders],
     gemLedger: server.gemLedger,
     ledger: {
       ...local.ledger,
@@ -160,6 +169,7 @@ function mergeAuthoritativeServerFields(
     supportTickets: server.supportTickets,
     financialLogs: server.financialLogs,
     adminAuditLogs: server.adminAuditLogs,
+    coopQuestClaims: server.coopQuestClaims ?? local.coopQuestClaims,
     market: {
       ...local.market,
       marketFrozenForPlayer: server.market?.marketFrozenForPlayer,
@@ -173,6 +183,9 @@ export default function App() {
   const [state, setState] = useState<GameState>(() => createInitialState());
   const [now, setNow] = useState<number>(() => Date.now());
   const [activeSection, setActiveSection] = useState<NavSection>('city');
+  const [alliancesInitialTab, setAlliancesInitialTab] = useState<
+    'directory' | 'coop_quests' | 'council' | 'treasury'
+  >('directory');
   const [selectedPlotId, setSelectedPlotId] = useState<string | null>(null);
   const [pendingBuildType, setPendingBuildType] = useState<BuildingType | null>(null);
   const [showBotModal, setShowBotModal] = useState(false);
@@ -180,6 +193,9 @@ export default function App() {
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [authToken, setAuthToken] = useState<string | null>(null);
   const [isSyncBusy, setIsSyncBusy] = useState(false);
+  const [coopQuestsData, setCoopQuestsData] = useState<CoopQuestsViewData | null>(null);
+  const [coopLoading, setCoopLoading] = useState(false);
+  const [claimingCoopQuestId, setClaimingCoopQuestId] = useState<string | null>(null);
   const [shieldConfirmAttack, setShieldConfirmAttack] =
     useState<PendingAttackConfirm | null>(null);
   const [toast, setToast] = useState<ToastMessage | null>(null);
@@ -653,6 +669,82 @@ export default function App() {
     pushToast('تم استلام مكافأة المهمة!', 'success');
   };
 
+  const fetchCoopQuests = useCallback(async () => {
+    const token = authTokenRef.current;
+    if (!token) return;
+    setCoopLoading(true);
+    try {
+      if (dirtyRef.current) {
+        await syncStateToServer();
+      }
+      const res = await apiRequest<CoopQuestsStatusResponse>(
+        API_ENDPOINTS.coopQuests,
+        { token, baseUrl: API_BASE_URL }
+      );
+      setCoopQuestsData({
+        serverId: res.serverId,
+        serverName: res.serverName,
+        serverPlayersCount: res.serverPlayersCount,
+        eligibleForCoop: res.eligibleForCoop,
+        mainLevel: res.mainLevel,
+        allianceCenterLevel: res.allianceCenterLevel,
+        quests: res.quests,
+      });
+    } catch (err) {
+      if (err instanceof ApiClientError) {
+        pushToast(err.message, 'error');
+      }
+    } finally {
+      setCoopLoading(false);
+    }
+  }, [pushToast, syncStateToServer]);
+
+  useEffect(() => {
+    if (authToken && activeSection === 'alliances') {
+      void fetchCoopQuests();
+    }
+  }, [authToken, activeSection, fetchCoopQuests]);
+
+  const handleClaimCoopQuest = async (questId: string) => {
+    const token = authTokenRef.current;
+    if (!token) return;
+    setClaimingCoopQuestId(questId);
+    try {
+      if (dirtyRef.current) {
+        await syncStateToServer();
+      }
+      const res = await apiRequest<CoopQuestClaimResponse>(
+        API_ENDPOINTS.coopQuestsClaim,
+        {
+          method: 'POST',
+          token,
+          baseUrl: API_BASE_URL,
+          body: { questId },
+        }
+      );
+      serverRevisionRef.current = res.revision;
+      dirtyRef.current = false;
+      const hydrated = hydrateLoadedState(res.state, res.serverTimeUtc || Date.now());
+      setState(hydrated);
+      stateRef.current = hydrated;
+      setCoopQuestsData((prev) =>
+        prev ? { ...prev, quests: res.quests } : prev
+      );
+      soundFx.play('claim', hydrated.soundEnabled);
+      pushToast('تم استلام مكافأة المهمة المشتركة للسيرفر!', 'success');
+    } catch (err) {
+      soundFx.play('error', stateRef.current.soundEnabled);
+      pushToast(
+        err instanceof ApiClientError
+          ? err.message
+          : 'تعذر استلام مكافأة المهمة المشتركة.',
+        'error'
+      );
+    } finally {
+      setClaimingCoopQuestId(null);
+    }
+  };
+
   const handleClaimMonthlyDay = (day: number) => {
     const res = claimMonthlyRewardDay(state, day, Date.now());
     if (res.error) {
@@ -674,15 +766,41 @@ export default function App() {
 
   const handleToggleSmartBot = () => {
     const currentNow = Date.now();
+    const hasPaidHakim = Boolean(
+      state.hakimSubscription?.active &&
+        typeof state.hakimSubscription?.expiresAt === 'number' &&
+        state.hakimSubscription.expiresAt > currentNow
+    );
+    if (!hasPaidHakim) {
+      soundFx.play('error', state.soundEnabled);
+      setShowBotModal(false);
+      setActiveSection('store');
+      pushToast(
+        'المستشار الذكي «حكيم» يتطلب اشتراكًا مدفوعًا مفعّلًا من المتجر الرسمي ولا يعمل مجانًا.',
+        'info'
+      );
+      return;
+    }
+
     const activating = !state.smartBotActive;
     commitState((prev) => {
+      const paidValid = Boolean(
+        prev.hakimSubscription?.active &&
+          typeof prev.hakimSubscription?.expiresAt === 'number' &&
+          prev.hakimSubscription.expiresAt > currentNow
+      );
+      if (!paidValid) {
+        return {
+          ...prev,
+          smartBotActive: false,
+          smartBotExpiresAt: null,
+        };
+      }
       const nextActivating = !prev.smartBotActive;
       const baseNext: GameState = {
         ...prev,
         smartBotActive: nextActivating,
-        smartBotExpiresAt: nextActivating
-          ? currentNow + 90 * 24 * 60 * 60 * 1000
-          : null,
+        smartBotExpiresAt: prev.hakimSubscription.expiresAt,
         botConfig: nextActivating
           ? {
               ...prev.botConfig,
@@ -700,8 +818,8 @@ export default function App() {
     soundFx.play('claim', state.soundEnabled);
     pushToast(
       activating
-        ? 'تم تفعيل المستشار الذكي (4 بناء · 2 بحث) — بدأ تنفيذ الخطة تلقائيًا.'
-        : 'تم التحويل إلى المستشار المجاني (2 بناء · 1 بحث).',
+        ? 'تم استئناف التشغيل التلقائي للمستشار الذكي حكيم (4 بناء · 2 بحث).'
+        : 'تم إيقاف التشغيل التلقائي مؤقتًا — اشتراكك في حكيم ما زال محفوظًا.',
       activating ? 'success' : 'info'
     );
   };
@@ -839,7 +957,7 @@ export default function App() {
     pushToast(res.summary ?? step.title, 'success');
   };
 
-  // Store & Payment Handlers
+  // Store & Payment Handlers (Direct Atomic D1 Persistence via POST /api/game/payment-orders)
   const handleSubmitPaymentOrder = async (
     productType: OrderProductType,
     productId: string,
@@ -847,22 +965,87 @@ export default function App() {
     transferRef: string,
     receiptName?: string,
     receiptPreviewUrl?: string
-  ) => {
+  ): Promise<{ error?: string }> => {
+    const token = authTokenRef.current;
     let uploadedReceiptId: string | undefined;
     if (
-      authTokenRef.current &&
+      token &&
       receiptPreviewUrl &&
       receiptPreviewUrl.startsWith('data:image/')
     ) {
       const candidateId = newReceiptId();
       const ok = await uploadReceiptImage(
-        authTokenRef.current,
+        token,
         candidateId,
         receiptPreviewUrl,
         API_BASE_URL
       );
-      if (ok) {
-        uploadedReceiptId = candidateId;
+      if (!ok) {
+        const errMsg =
+          'تعذر رفع صورة الفاتورة إلى الخادم. تأكد من الاتصال وحجم الصورة وحاول مجددًا.';
+        soundFx.play('error', stateRef.current.soundEnabled);
+        pushToast(errMsg, 'error');
+        return { error: errMsg };
+      }
+      uploadedReceiptId = candidateId;
+    }
+
+    if (token) {
+      try {
+        const res = await apiRequest<GamePaymentOrderResponse>(
+          API_ENDPOINTS.gamePaymentOrders,
+          {
+            method: 'POST',
+            token,
+            baseUrl: API_BASE_URL,
+            body: {
+              productType,
+              productId,
+              paymentMethod,
+              transferRef,
+              receiptName,
+              receiptId: uploadedReceiptId,
+            },
+          }
+        );
+
+        serverRevisionRef.current = res.revision;
+        const hydratedServer = hydrateLoadedState(
+          res.state,
+          res.serverTimeUtc || Date.now()
+        );
+        setState((prev) => {
+          const existingIds = new Set(hydratedServer.paymentOrders.map((o) => o.id));
+          const mergedOrders = existingIds.has(res.order.id)
+            ? hydratedServer.paymentOrders
+            : [res.order, ...hydratedServer.paymentOrders];
+          const nextState: GameState = {
+            ...prev,
+            adminConfig: hydratedServer.adminConfig,
+            paymentOrders: mergedOrders,
+          };
+          stateRef.current = nextState;
+          return nextState;
+        });
+
+        soundFx.play('claim', stateRef.current.soundEnabled);
+        pushToast(
+          `تم إرسال الطلب ${res.order.id} وحفظه في قاعدة البيانات بحالة «قيد المراجعة» ليظهر مباشرة في لوحة الإدارة.`,
+          'success'
+        );
+        return {};
+      } catch (err) {
+        const errMsg =
+          err instanceof Error
+            ? err.message
+            : 'تعذر حفظ طلب الدفع في الخادم. يرجى المحاولة مجددًا.';
+        if (err instanceof ApiClientError && err.status === 401) {
+          setAuthToken(null);
+          dirtyRef.current = false;
+        }
+        soundFx.play('error', stateRef.current.soundEnabled);
+        pushToast(errMsg, 'error');
+        return { error: errMsg };
       }
     }
 
@@ -880,7 +1063,7 @@ export default function App() {
     if (res.error) {
       soundFx.play('error', stateRef.current.soundEnabled);
       pushToast(res.error, 'error');
-      return;
+      return { error: res.error };
     }
     soundFx.play('claim', stateRef.current.soundEnabled);
     commitState(stripInlineReceiptPreviews(res.state), true);
@@ -888,6 +1071,7 @@ export default function App() {
       `تم إرسال طلب الدفع ${res.order?.id ?? ''} بحالة «قيد المراجعة» بانتظار اعتماد المؤسس.`,
       'success'
     );
+    return {};
   };
 
   const handleBuySpeedUpCard = (tierId: SpeedUpTierId, qty: number) => {
@@ -1603,6 +1787,10 @@ export default function App() {
                 state={state}
                 now={now}
                 onClaimQuest={handleClaimQuest}
+                onOpenCoopQuests={() => {
+                  setAlliancesInitialTab('coop_quests');
+                  setActiveSection('alliances');
+                }}
               />
             </div>
           )}
@@ -1647,6 +1835,12 @@ export default function App() {
               <AlliancesView
                 state={state}
                 now={now}
+                initialTab={alliancesInitialTab}
+                coopQuestsData={coopQuestsData}
+                coopLoading={coopLoading}
+                claimingCoopQuestId={claimingCoopQuestId}
+                onRefreshCoopQuests={() => void fetchCoopQuests()}
+                onClaimCoopQuest={(qId) => void handleClaimCoopQuest(qId)}
                 onCreateAlliance={handleCreateAlliance}
                 onLeaveAlliance={handleLeaveAlliance}
               />
@@ -1698,6 +1892,7 @@ export default function App() {
             onRunPlanStep={handleRunSmartCycle}
             onNavigateAndFocus={handleNavigateAndFocus}
             onToggleSmartBot={handleToggleSmartBot}
+            onOpenStore={() => setActiveSection('store')}
           />
 
           {/* Non-blocking Toast Banner */}
@@ -1809,6 +2004,10 @@ export default function App() {
           onExecuteStep={handleExecutePlanStep}
           onRunBotResourceRaid={handleRunBotResourceRaid}
           onNavigateAndFocus={handleNavigateAndFocus}
+          onOpenStore={() => {
+            setShowBotModal(false);
+            setActiveSection('store');
+          }}
         />
       )}
 

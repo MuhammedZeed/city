@@ -33,6 +33,7 @@ import {
 } from '@enginora/shared';
 import { GameState, PaymentMethodId } from '@enginora/shared';
 import { LegalPoliciesModal } from './LegalPoliciesModal';
+import { PaymentDestinationCard } from './PaymentDestinationCard';
 
 export interface PlayerRegisterPayload extends RegistrationSubmitPayload {
   password?: string;
@@ -836,6 +837,11 @@ export const PlayerAuthScreen: React.FC<PlayerAuthScreenProps> = ({
                             })}
                           </div>
                         )}
+                        <PaymentDestinationCard
+                          methodId={activePayMethod}
+                          config={state.adminConfig.paymentMethods?.[activePayMethod]}
+                          amountSar={feeSar}
+                        />
                       </div>
 
                       {/* Mandatory Registration Invoice Upload */}

@@ -60,7 +60,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
       title: 'العالم والتجارة',
       items: [
         { id: 'world_map', label: 'خريطة العالم', icon: Globe2 },
-        { id: 'alliances', label: 'التحالفات', icon: Users, unlockMainLv: 3 },
+        { id: 'alliances', label: 'التحالفات', icon: Users, unlockMainLv: 10 },
         { id: 'market', label: 'سوق التجارة', icon: Store, unlockMainLv: 10 },
       ],
     },

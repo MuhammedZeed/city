@@ -27,6 +27,7 @@ interface AdvisorWidgetProps {
   onRunPlanStep: () => void;
   onNavigateAndFocus: (section: NavSection, plotId?: string) => void;
   onToggleSmartBot: () => void;
+  onOpenStore?: () => void;
 }
 
 interface FloatingPos {
@@ -46,6 +47,7 @@ export const AdvisorWidget: React.FC<AdvisorWidgetProps> = ({
   onRunPlanStep,
   onNavigateAndFocus,
   onToggleSmartBot,
+  onOpenStore,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
@@ -87,7 +89,12 @@ export const AdvisorWidget: React.FC<AdvisorWidgetProps> = ({
     moved: false,
   });
 
-  const isSmart = state.smartBotActive;
+  const hasPaidHakim = Boolean(
+    state.hakimSubscription?.active &&
+      typeof state.hakimSubscription?.expiresAt === 'number' &&
+      state.hakimSubscription.expiresAt > now
+  );
+  const isSmart = hasPaidHakim && state.smartBotActive;
   const prevSmartRef = useRef(isSmart);
 
   useEffect(() => {
@@ -348,18 +355,33 @@ export const AdvisorWidget: React.FC<AdvisorWidgetProps> = ({
             </div>
 
             <div className="flex items-center gap-1 shrink-0">
-              <button
-                type="button"
-                onClick={onToggleSmartBot}
-                className={`min-h-[32px] px-2 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 border transition-colors ${
-                  isSmart
-                    ? 'bg-sky-950/70 hover:bg-sky-900/80 border-sky-500/50 text-sky-200'
-                    : 'bg-amber-500/20 hover:bg-amber-500/35 border-amber-400/60 text-amber-200'
-                }`}
-              >
-                <ArrowLeftRight className="w-3 h-3" />
-                <span>{isSmart ? 'للمجاني' : 'للذكي'}</span>
-              </button>
+              {hasPaidHakim ? (
+                <button
+                  type="button"
+                  onClick={onToggleSmartBot}
+                  className={`min-h-[32px] px-2 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 border transition-colors ${
+                    isSmart
+                      ? 'bg-sky-950/70 hover:bg-sky-900/80 border-sky-500/50 text-sky-200'
+                      : 'bg-amber-500/20 hover:bg-amber-500/35 border-amber-400/60 text-amber-200'
+                  }`}
+                >
+                  <ArrowLeftRight className="w-3 h-3" />
+                  <span>{isSmart ? 'إيقاف مؤقت' : 'استئناف الذكي'}</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExpanded(false);
+                    if (onOpenStore) onOpenStore();
+                    else onNavigateAndFocus('store');
+                  }}
+                  className="min-h-[32px] px-2 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 border bg-amber-500/20 hover:bg-amber-500/35 border-amber-400/60 text-amber-200 transition-colors"
+                >
+                  <Sparkles className="w-3 h-3" />
+                  <span>اشتراك حكيم</span>
+                </button>
+              )}
 
               <button
                 type="button"

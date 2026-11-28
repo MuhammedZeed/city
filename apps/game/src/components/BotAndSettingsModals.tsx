@@ -66,6 +66,7 @@ export const BotModal: React.FC<{
   onExecuteStep: (step: StrategicPlanStep) => void;
   onRunBotResourceRaid: () => void;
   onNavigateAndFocus: (section: NavSection, plotId?: string) => void;
+  onOpenStore?: () => void;
 }> = ({
   state,
   now,
@@ -78,6 +79,7 @@ export const BotModal: React.FC<{
   onExecuteStep,
   onRunBotResourceRaid,
   onNavigateAndFocus,
+  onOpenStore,
 }) => {
   const [portraitFailed, setPortraitFailed] = useState(false);
   const [tab, setTab] = useState<AdvisorModalTab>(initialTab);
@@ -93,7 +95,12 @@ export const BotModal: React.FC<{
     },
   ]);
 
-  const isSmart = state.smartBotActive;
+  const hasPaidHakim = Boolean(
+    state.hakimSubscription?.active &&
+      typeof state.hakimSubscription?.expiresAt === 'number' &&
+      state.hakimSubscription.expiresAt > now
+  );
+  const isSmart = hasPaidHakim && state.smartBotActive;
   const portraitSrc = isSmart ? SMART_ADVISOR_PORTRAIT : FREE_ADVISOR_PORTRAIT;
   const speakerName = isSmart
     ? 'كبير المستشارين الاستراتيجيين: حكيم'
@@ -498,17 +505,30 @@ export const BotModal: React.FC<{
                 {!isSmart && (
                   <div className="p-3 rounded-xl bg-amber-950/25 border border-amber-500/45 flex flex-wrap items-center justify-between gap-2">
                     <span className="text-amber-200 text-[11px]">
-                      عند اعتماد خطة مع المستشار الذكي، يقوم بالبناء والبحث وتسيير السفن تلقائيًا دون الحاجة لأي تنفيذ يدوي.
+                      {hasPaidHakim
+                        ? 'اشتراكك في المستشار الذكي «حكيم» نشط — يمكنك استئناف التشغيل التلقائي ليتولى البناء والبحث والأسطول فورًا.'
+                        : 'ميزة التشغيل التلقائي للمدينة (4 بناء · 2 بحث) متاحة حصريًا لمشتركي باقة «المستشار الذكي حكيم» من المتجر الرسمي.'}
                     </span>
                     <button
                       type="button"
                       onClick={() => {
-                        onToggleSmartBot();
+                        if (hasPaidHakim) {
+                          onToggleSmartBot();
+                        } else if (onOpenStore) {
+                          onOpenStore();
+                        } else {
+                          onNavigateAndFocus('store');
+                          onClose();
+                        }
                       }}
                       className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] flex items-center gap-1 shrink-0"
                     >
                       <Zap className="w-3.5 h-3.5" />
-                      <span>اعتماد الخطة وتفعيل العمل التلقائي</span>
+                      <span>
+                        {hasPaidHakim
+                          ? 'استئناف العمل التلقائي'
+                          : 'اشترك في المستشار الذكي من المتجر'}
+                      </span>
                     </button>
                   </div>
                 )}
@@ -523,9 +543,6 @@ export const BotModal: React.FC<{
                         type="button"
                         onClick={() => {
                           onUpdateBotConfig({ planId: pid, autoDevelopCity: true });
-                          if (!isSmart) {
-                            onToggleSmartBot();
-                          }
                         }}
                         className={`p-3.5 rounded-xl border text-right transition-colors space-y-1.5 ${
                           selected
@@ -702,20 +719,31 @@ export const BotModal: React.FC<{
                 </div>
               </div>
 
-              {!state.smartBotActive && (
+              {!isSmart && (
                 <div className="p-3.5 rounded-xl bg-amber-950/30 border border-amber-500/45 flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2 text-amber-200">
                     <ShieldAlert className="w-4 h-4 shrink-0" />
                     <span>
-                      التشغيل التلقائي المستمر يتطلب تفعيل وضع المستشار الذكي (4 خانات بناء · 2 بحث).
+                      {hasPaidHakim
+                        ? 'اشتراكك نشط — يمكنك تشغيل المستشار الذكي (4 خانات بناء · 2 بحث) الآن.'
+                        : 'التشغيل التلقائي المستمر و(4 خانات بناء · 2 بحث) يتطلب الاشتراك المدفوع في «المستشار الذكي حكيم» من المتجر.'}
                     </span>
                   </div>
                   <button
                     type="button"
-                    onClick={onToggleSmartBot}
+                    onClick={() => {
+                      if (hasPaidHakim) {
+                        onToggleSmartBot();
+                      } else if (onOpenStore) {
+                        onOpenStore();
+                      } else {
+                        onNavigateAndFocus('store');
+                        onClose();
+                      }
+                    }}
                     className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold"
                   >
-                    تفعيل المستشار الذكي
+                    {hasPaidHakim ? 'تشغيل المستشار الذكي' : 'الانتقال للمتجر للاشتراك'}
                   </button>
                 </div>
               )}
@@ -801,25 +829,45 @@ export const BotModal: React.FC<{
               </div>
 
               <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800">
-                <span className="text-slate-400">
-                  تبديل وضع المستشار في النسخة التجريبية:
+                <span className="text-slate-300">
+                  {hasPaidHakim
+                    ? 'حالة اشتراكك في المستشار الذكي حكيم: مفعّل ونشط.'
+                    : `اشتراك المستشار الذكي حكيم (${state.adminConfig.hakimPriceSar} ريال / ${state.adminConfig.hakimDurationDays} يومًا) متاح عبر المتجر الرسمي فقط.`}
                 </span>
-                <button
-                  type="button"
-                  onClick={onToggleSmartBot}
-                  className={`px-4 py-2 rounded-lg font-bold flex items-center gap-2 transition-colors ${
-                    state.smartBotActive
-                      ? 'bg-slate-800 hover:bg-slate-700 text-slate-200'
-                      : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
-                  }`}
-                >
-                  <Check className="w-4 h-4" />
-                  <span>
-                    {state.smartBotActive
-                      ? 'العودة إلى المساعد المجاني (2/1)'
-                      : 'تفعيل معاينة المستشار الذكي (4/2)'}
-                  </span>
-                </button>
+                {hasPaidHakim ? (
+                  <button
+                    type="button"
+                    onClick={onToggleSmartBot}
+                    className={`px-4 py-2 rounded-lg font-bold flex items-center gap-2 transition-colors ${
+                      state.smartBotActive
+                        ? 'bg-slate-800 hover:bg-slate-700 text-slate-200'
+                        : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                    }`}
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>
+                      {state.smartBotActive
+                        ? 'إيقاف التشغيل التلقائي مؤقتًا'
+                        : 'استئناف عمل المستشار الذكي (4/2)'}
+                    </span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (onOpenStore) {
+                        onOpenStore();
+                      } else {
+                        onNavigateAndFocus('store');
+                        onClose();
+                      }
+                    }}
+                    className="px-4 py-2 rounded-lg font-bold flex items-center gap-2 bg-amber-500 hover:bg-amber-400 text-slate-950 transition-colors"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    <span>اشترك في المستشار الذكي حكيم من المتجر</span>
+                  </button>
+                )}
               </div>
             </>
           )}

@@ -440,7 +440,7 @@ export const PlotInspectorPanel: React.FC<PlotInspectorPanelProps> = ({
                         : 'bg-slate-800 text-slate-500 cursor-not-allowed'
                     }`}
                   >
-                    إطلاق قافلة تجارة بحرية (عائد موارد + رصيد تجارة)
+                    إطلاق قافلة تجارة بحرية (إمداد موارد ونقاط إنجاز)
                   </button>
                 )}
               </div>
