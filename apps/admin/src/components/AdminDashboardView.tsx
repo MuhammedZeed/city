@@ -53,6 +53,7 @@ import {
   AdminConfig,
   AdminPlayerRecord,
   AdminRole,
+  AdminRoleCredentialStatus,
   FinancialCategory,
   GameServerConfig,
   MarketResourceId,
@@ -63,6 +64,8 @@ import {
 } from "@enginora/shared";
 
 const FounderVaultSection = React.lazy(() => import("./FounderVaultSection"));
+import { PlayerAccountEditorCard } from "./PlayerAccountEditorCard";
+import type { AdminPlayerAccountPatch } from "../engine/adminEngine";
 
 const ReceiptPreviewControl: React.FC<{
   receiptId?: string;
@@ -185,6 +188,14 @@ export const AdminDashboardView: React.FC<{
   players: AdminPlayerRecord[];
   selectedPlayerId: string;
   onSelectPlayer: (accountId: string) => void;
+  selectedBackupServerId: string;
+  onSelectBackupServer: (serverId: string) => void;
+  roleCredentials: AdminRoleCredentialStatus[];
+  onSaveRoleCredential: (
+    role: AdminRole,
+    newPassword: string
+  ) => Promise<{ error?: string }>;
+  onResetRoleCredential: (role: AdminRole) => Promise<{ error?: string }>;
   now: number;
   adminRole: AdminRole;
   backupSnapshots: AdminBackupSnapshot[];
@@ -202,12 +213,19 @@ export const AdminDashboardView: React.FC<{
     decision: 'approve' | 'reject',
     note: string
   ) => void;
+  onUpdatePlayerAccount: (
+    accountId: string,
+    patch: AdminPlayerAccountPatch
+  ) => Promise<boolean>;
   onResetPlayerPassword: (
     accountId: string,
     newPassword: string
   ) => Promise<{ error?: string }>;
-  onCreateBackupSnapshot: (label: string, targetAccountId: string) => void;
-  onRestoreBackupSnapshot: (payloadJson: string, targetAccountId: string) => void;
+  onCreateBackupSnapshot: (label: string, serverId: string) => void;
+  onRestoreBackupSnapshot: (opts: {
+    backupId?: string;
+    payloadJson?: string;
+  }) => Promise<boolean>;
   onDeleteBackupSnapshot: (snapshotId: string) => void;
   onReverseMarketOffer: (
     accountId: string,
@@ -238,6 +256,11 @@ export const AdminDashboardView: React.FC<{
   players,
   selectedPlayerId,
   onSelectPlayer,
+  selectedBackupServerId,
+  onSelectBackupServer,
+  roleCredentials,
+  onSaveRoleCredential,
+  onResetRoleCredential,
   now,
   adminRole,
   backupSnapshots,
@@ -246,6 +269,7 @@ export const AdminDashboardView: React.FC<{
   onRefreshOverview,
   onReviewPaymentOrder,
   onReviewRegistration,
+  onUpdatePlayerAccount,
   onResetPlayerPassword,
   onCreateBackupSnapshot,
   onRestoreBackupSnapshot,
@@ -295,6 +319,22 @@ export const AdminDashboardView: React.FC<{
   const [newServerName, setNewServerName] = useState('');
   const [newServerCapacity, setNewServerCapacity] = useState(150);
   const [receiptLightbox, setReceiptLightbox] = useState<string | null>(null);
+  const [rolePwInputs, setRolePwInputs] = useState<Record<AdminRole, string>>({
+    founder: '',
+    partner: '',
+    support: '',
+  });
+  const [rolePwVisible, setRolePwVisible] = useState<Record<AdminRole, boolean>>({
+    founder: false,
+    partner: false,
+    support: false,
+  });
+  const [rolePwSaving, setRolePwSaving] = useState<AdminRole | null>(null);
+  const [rolePwFeedback, setRolePwFeedback] = useState<{
+    role: AdminRole;
+    text: string;
+    isError?: boolean;
+  } | null>(null);
 
   useEffect(() => {
     setConfigDraft(adminConfig);
@@ -1362,6 +1402,16 @@ export const AdminDashboardView: React.FC<{
                         )}
                       </div>
 
+                      {isFounder && (
+                        <PlayerAccountEditorCard
+                          player={selectedPlayer}
+                          adminConfig={adminConfig}
+                          now={now}
+                          busyAction={busyAction}
+                          onUpdatePlayerAccount={onUpdatePlayerAccount}
+                        />
+                      )}
+
                       {/* Founder-Only Manual Password Reset */}
                       {isFounder && (
                         <form
@@ -2004,6 +2054,33 @@ export const AdminDashboardView: React.FC<{
                       id: mId,
                       enabled: true,
                       discountPct: 0,
+                      bankOrNetwork: '',
+                      accountTitle: '',
+                      accountNumber: '',
+                      ibanOrAddress: '',
+                      paymentLink: '',
+                      instructions: '',
+                    };
+                    const updatePmField = (
+                      field:
+                        | 'bankOrNetwork'
+                        | 'accountTitle'
+                        | 'accountNumber'
+                        | 'ibanOrAddress'
+                        | 'paymentLink'
+                        | 'instructions',
+                      value: string
+                    ) => {
+                      setConfigDraft((p) => ({
+                        ...p,
+                        paymentMethods: {
+                          ...p.paymentMethods,
+                          [mId]: {
+                            ...pm,
+                            [field]: value,
+                          },
+                        },
+                      }));
                     };
                     const sampleAfter = Number(
                       (
@@ -2014,7 +2091,7 @@ export const AdminDashboardView: React.FC<{
                     return (
                       <div
                         key={mId}
-                        className={`glass-subpanel p-3.5 rounded-xl border space-y-2.5 ${
+                        className={`glass-subpanel p-3.5 rounded-xl border space-y-3 ${
                           pm.enabled ? 'border-slate-700/70' : 'border-rose-500/45 opacity-80'
                         }`}
                       >
@@ -2083,6 +2160,92 @@ export const AdminDashboardView: React.FC<{
                               مثال ({configDraft.registrationFeeSar} ر →{' '}
                               <strong className="text-amber-300">{sampleAfter} ر</strong>)
                             </span>
+                          </div>
+                        </div>
+
+                        <div className="pt-2.5 border-t border-slate-800/80 space-y-2">
+                          <div className="text-[11px] font-bold text-sky-300">
+                            بيانات التحويل والحساب الظاهرة للاعب عند اختيار هذه الوسيلة:
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-[10px] text-slate-400 mb-0.5">
+                                {mId === 'binance' ? 'الشبكة / المنصة (مثلاً TRC20 / Binance Pay)' : 'اسم البنك أو المزود'}
+                              </label>
+                              <input
+                                type="text"
+                                disabled={!isFounder}
+                                value={pm.bankOrNetwork ?? ''}
+                                onChange={(e) => updatePmField('bankOrNetwork', e.target.value)}
+                                placeholder={mId === 'binance' ? 'TRC20 / Binance Pay' : 'مثال: مصرف الراجحي'}
+                                className="w-full min-h-[36px] px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-700 text-slate-100"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] text-slate-400 mb-0.5">
+                                اسم المستفيد / صاحب الحساب
+                              </label>
+                              <input
+                                type="text"
+                                disabled={!isFounder}
+                                value={pm.accountTitle ?? ''}
+                                onChange={(e) => updatePmField('accountTitle', e.target.value)}
+                                placeholder="الاسم الظاهر للمحول..."
+                                className="w-full min-h-[36px] px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-700 text-slate-100"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] text-slate-400 mb-0.5">
+                                {mId === 'binance' ? 'معرّف Binance Pay ID' : 'رقم الحساب / رقم الجوال / البطاقة'}
+                              </label>
+                              <input
+                                type="text"
+                                disabled={!isFounder}
+                                value={pm.accountNumber ?? ''}
+                                onChange={(e) => updatePmField('accountNumber', e.target.value)}
+                                placeholder={mId === 'binance' ? 'Pay ID' : 'رقم الحساب أو الجوال...'}
+                                className="w-full min-h-[36px] px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-700 text-amber-200 font-num"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] text-slate-400 mb-0.5">
+                                {mId === 'binance' ? 'عنوان المحفظة (Wallet Address)' : 'رقم الآيبان (IBAN)'}
+                              </label>
+                              <input
+                                type="text"
+                                disabled={!isFounder}
+                                value={pm.ibanOrAddress ?? ''}
+                                onChange={(e) => updatePmField('ibanOrAddress', e.target.value)}
+                                placeholder={mId === 'binance' ? 'عنوان USDT...' : 'SA...'}
+                                className="w-full min-h-[36px] px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-700 text-emerald-200 font-num"
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-slate-400 mb-0.5">
+                              رابط الدفع المباشر (اختياري — يبدأ بـ https://)
+                            </label>
+                            <input
+                              type="url"
+                              disabled={!isFounder}
+                              value={pm.paymentLink ?? ''}
+                              onChange={(e) => updatePmField('paymentLink', e.target.value)}
+                              placeholder="https://..."
+                              className="w-full min-h-[36px] px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-700 text-sky-300 font-num"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-slate-400 mb-0.5">
+                              تعليمات إضافية للاعب
+                            </label>
+                            <input
+                              type="text"
+                              disabled={!isFounder}
+                              value={pm.instructions ?? ''}
+                              onChange={(e) => updatePmField('instructions', e.target.value)}
+                              placeholder="مثال: أرفق صورة الإيصال واكتب رقم المرجع بعد التحويل..."
+                              className="w-full min-h-[36px] px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-700 text-slate-200"
+                            />
                           </div>
                         </div>
                       </div>
@@ -2587,6 +2750,180 @@ export const AdminDashboardView: React.FC<{
               </div>
             </div>
 
+            {isFounder && (
+              <div className="glass-panel p-5 rounded-2xl border-amber-500/35 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800">
+                  <div>
+                    <h4 className="text-sm font-bold text-amber-300 flex items-center gap-2">
+                      <KeyRound className="w-4 h-4" />
+                      <span>كلمات مرور الصلاحيات الإدارية (كلمة سر مستقلة لكل دور)</span>
+                    </h4>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      لكل صلاحية كلمة مرور خاصة ومعزولة لا تعمل مع أي دور آخر. تغيير كلمة مرور الشريك أو الدعم ينهي جلساته المفتوحة فورًا.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                  {(['founder', 'partner', 'support'] as AdminRole[]).map((rKey) => {
+                    const cred = roleCredentials.find((c) => c.role === rKey);
+                    const source = cred?.source ?? 'unconfigured';
+                    const isSaving = rolePwSaving === rKey;
+                    const pwVal = rolePwInputs[rKey] ?? '';
+                    const isVisible = rolePwVisible[rKey] ?? false;
+
+                    return (
+                      <div
+                        key={rKey}
+                        className="glass-subpanel p-3.5 rounded-xl border border-slate-700/70 space-y-3"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="font-bold text-slate-100 text-xs">
+                              {ROLE_LABELS[rKey]}
+                            </div>
+                            <div className="text-[10px] text-slate-400 font-num mt-0.5">
+                              {cred?.updatedAt
+                                ? `آخر تحديث: ${formatKsaDateTime(cred.updatedAt)}`
+                                : 'لا يوجد تعديل يدوي محفوظ'}
+                            </div>
+                          </div>
+                          <span
+                            className={`px-2 py-0.5 rounded-md text-[10px] font-bold shrink-0 ${
+                              source === 'database'
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40'
+                                : source === 'env_secret'
+                                  ? 'bg-sky-500/20 text-sky-300 border border-sky-400/40'
+                                  : 'bg-rose-500/20 text-rose-300 border border-rose-400/40'
+                            }`}
+                          >
+                            {source === 'database'
+                              ? 'مخصصة في D1'
+                              : source === 'env_secret'
+                                ? 'متغير الخادم'
+                                : 'غير مهيأة'}
+                          </span>
+                        </div>
+
+                        <div className="relative">
+                          <input
+                            type={isVisible ? 'text' : 'password'}
+                            value={pwVal}
+                            disabled={busyAction || isSaving}
+                            onChange={(e) =>
+                              setRolePwInputs((prev) => ({
+                                ...prev,
+                                [rKey]: e.target.value,
+                              }))
+                            }
+                            placeholder="كلمة مرور جديدة (8 أحرف فأكثر)..."
+                            className="w-full min-h-[38px] pr-3 pl-9 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 text-xs"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setRolePwVisible((prev) => ({
+                                ...prev,
+                                [rKey]: !prev[rKey],
+                              }))
+                            }
+                            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200"
+                            title={isVisible ? 'إخفاء' : 'إظهار'}
+                          >
+                            {isVisible ? (
+                              <EyeOff className="w-3.5 h-3.5" />
+                            ) : (
+                              <Eye className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        </div>
+
+                        {rolePwFeedback?.role === rKey && (
+                          <div
+                            className={`p-2 rounded-lg text-[11px] font-semibold ${
+                              rolePwFeedback.isError
+                                ? 'bg-rose-950/70 border border-rose-500/50 text-rose-200'
+                                : 'bg-emerald-950/60 border border-emerald-500/50 text-emerald-200'
+                            }`}
+                          >
+                            {rolePwFeedback.text}
+                          </div>
+                        )}
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={busyAction || isSaving}
+                            onClick={() => {
+                              if (pwVal.length < 8) {
+                                setRolePwFeedback({
+                                  role: rKey,
+                                  text: 'يجب أن تتكون كلمة المرور من 8 أحرف على الأقل.',
+                                  isError: true,
+                                });
+                                return;
+                              }
+                              setRolePwSaving(rKey);
+                              setRolePwFeedback(null);
+                              void onSaveRoleCredential(rKey, pwVal).then((res) => {
+                                setRolePwSaving(null);
+                                if (res.error) {
+                                  setRolePwFeedback({
+                                    role: rKey,
+                                    text: res.error,
+                                    isError: true,
+                                  });
+                                } else {
+                                  setRolePwInputs((prev) => ({ ...prev, [rKey]: '' }));
+                                  setRolePwFeedback({
+                                    role: rKey,
+                                    text: 'تم الحفظ بنجاح وإلغاء الجلسات السابقة.',
+                                  });
+                                }
+                              });
+                            }}
+                            className="flex-1 min-h-[36px] px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-[11px]"
+                          >
+                            {isSaving ? 'جارٍ الحفظ...' : 'حفظ كلمة مرور مستقلة'}
+                          </button>
+
+                          {source === 'database' && (
+                            <button
+                              type="button"
+                              disabled={busyAction || isSaving}
+                              onClick={() => {
+                                setRolePwSaving(rKey);
+                                setRolePwFeedback(null);
+                                void onResetRoleCredential(rKey).then((res) => {
+                                  setRolePwSaving(null);
+                                  if (res.error) {
+                                    setRolePwFeedback({
+                                      role: rKey,
+                                      text: res.error,
+                                      isError: true,
+                                    });
+                                  } else {
+                                    setRolePwFeedback({
+                                      role: rKey,
+                                      text: 'تمت العودة لمتغير الخادم (Secret).',
+                                    });
+                                  }
+                                });
+                              }}
+                              className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-bold text-[11px]"
+                              title="الرجوع إلى كلمة المرور المضبوطة في Cloudflare Secrets"
+                            >
+                              إعادة للـ Secret
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Admin Audit Logs Across Platform */}
             <div className="glass-panel rounded-2xl overflow-hidden">
               <div className="px-4 py-3 border-b border-slate-700/45 font-bold text-slate-100 flex items-center gap-2">
@@ -2740,26 +3077,32 @@ export const AdminDashboardView: React.FC<{
                 <div>
                   <h3 className="text-sm font-bold text-emerald-300 flex items-center gap-2">
                     <HardDriveDownload className="w-4 h-4" />
-                    <span>النسخ الاحتياطي السحابي في D1 (حصري للمؤسس)</span>
+                    <span>النسخ الاحتياطي السحابي للسيرفرات في D1 (حصري للمؤسس)</span>
                   </h3>
                   <p className="text-[11px] text-slate-300 mt-1">
-                    تُحفظ النسخ الاحتياطية الآن داخل قاعدة Cloudflare D1 ويمكن استعادتها أو تصديرها لأي حساب لاعب في أي وقت.
+                    تُحفظ النسخ الاحتياطية على مستوى السيرفر بالكامل داخل Cloudflare D1 شاملة إعدادات السيرفر وتقدم جميع لاعبيه، ويمكن استعادتها أو تصديرها في أي وقت.
                   </p>
                 </div>
 
-                {players.length > 0 && (
-                  <select
-                    value={selectedPlayer?.accountId ?? ''}
-                    onChange={(e) => onSelectPlayer(e.target.value)}
-                    className="min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-700 text-amber-300 font-bold"
-                  >
-                    {players.map((p) => (
-                      <option key={p.accountId} value={p.accountId}>
-                        الحساب المستهدف: {p.commanderName} ({p.accountId})
+                <select
+                  value={selectedBackupServerId}
+                  onChange={(e) => onSelectBackupServer(e.target.value)}
+                  className="min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-700 text-amber-300 font-bold"
+                >
+                  {adminConfig.servers.map((srv) => {
+                    const srvCount = players.filter(
+                      (p) => (p.selectedServerId || p.state.selectedServerId) === srv.id
+                    ).length;
+                    return (
+                      <option key={srv.id} value={srv.id}>
+                        السيرفر: [{srv.code}] {srv.name} ({srvCount} لاعب)
                       </option>
-                    ))}
-                  </select>
-                )}
+                    );
+                  })}
+                  <option value="ALL">
+                    جميع السيرفرات والمنصة بالكامل ({players.length} لاعب)
+                  </option>
+                </select>
               </div>
 
               <div className="flex flex-wrap items-center gap-2.5">
@@ -2767,69 +3110,114 @@ export const AdminDashboardView: React.FC<{
                   type="text"
                   value={backupLabel}
                   onChange={(e) => setBackupLabel(e.target.value)}
-                  placeholder="وصف النسخة الاحتياطية (اختياري)..."
+                  placeholder="وصف نسخة السيرفر الاحتياطية (اختياري)..."
                   className="flex-1 min-w-[200px] min-h-[42px] px-3 py-2 rounded-xl bg-slate-950/85 border border-slate-700 text-slate-100"
                 />
                 <button
                   type="button"
-                  disabled={!selectedPlayer || busyAction}
+                  disabled={busyAction}
                   onClick={() => {
-                    if (!selectedPlayer) return;
-                    onCreateBackupSnapshot(backupLabel, selectedPlayer.accountId);
+                    onCreateBackupSnapshot(backupLabel, selectedBackupServerId);
+                    const srvLabel =
+                      selectedBackupServerId === 'ALL'
+                        ? 'جميع السيرفرات'
+                        : adminConfig.servers.find((s) => s.id === selectedBackupServerId)
+                            ?.name ?? selectedBackupServerId;
                     setBackupLabel('');
-                    setBackupFeedback(`تم إنشاء وحفظ النسخة الاحتياطية في D1 لحساب ${selectedPlayer.commanderName}.`);
+                    setBackupFeedback(
+                      `تم إنشاء وحفظ النسخة الاحتياطية للسيرفر (${srvLabel}) في D1.`
+                    );
                   }}
                   className="min-h-[42px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold flex items-center gap-1.5"
                 >
                   <Archive className="w-4 h-4" />
-                  <span>إنشاء نسخة في D1</span>
+                  <span>إنشاء نسخة للسيرفر في D1</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => {
-                    const exportObj = selectedPlayer
-                      ? selectedPlayer.state
-                      : { exportedAt: now, adminConfig, playersCount: players.length };
+                    const targetPlayers =
+                      selectedBackupServerId === 'ALL'
+                        ? players
+                        : players.filter(
+                            (p) =>
+                              (p.selectedServerId || p.state.selectedServerId || 'srv-1') ===
+                              selectedBackupServerId
+                          );
+                    const serverCfg =
+                      selectedBackupServerId === 'ALL'
+                        ? null
+                        : adminConfig.servers.find((s) => s.id === selectedBackupServerId) ??
+                          null;
+                    const serverName =
+                      selectedBackupServerId === 'ALL'
+                        ? 'جميع السيرفرات'
+                        : serverCfg?.name ?? selectedBackupServerId;
+                    const exportObj = {
+                      backupType: 'server_snapshot_v1',
+                      exportedAt: now,
+                      serverId: selectedBackupServerId || 'ALL',
+                      serverName,
+                      playersCount: targetPlayers.length,
+                      serverConfig: serverCfg,
+                      adminConfig,
+                      players: targetPlayers.map((p) => ({
+                        accountId: p.accountId,
+                        email: p.email,
+                        phone: p.phone,
+                        emailVerified: p.emailVerified,
+                        commanderName: p.commanderName,
+                        registrationStatus: p.registrationStatus,
+                        selectedServerId:
+                          p.selectedServerId || p.state.selectedServerId || 'srv-1',
+                        revision: p.revision,
+                        createdAt: p.createdAt,
+                        updatedAt: p.updatedAt,
+                        state: p.state,
+                      })),
+                    };
                     const blob = new Blob([JSON.stringify(exportObj, null, 2)], {
                       type: 'application/json',
                     });
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = `ENGINORA_${selectedPlayer ? selectedPlayer.accountId : 'PLATFORM'}_${Date.now()}.json`;
+                    a.download = `ENGINORA_${selectedBackupServerId || 'ALL'}_${Date.now()}.json`;
                     a.click();
                     URL.revokeObjectURL(url);
                   }}
                   className="min-h-[42px] px-4 py-2 rounded-xl bg-[#1D4ED8] hover:bg-blue-600 text-white font-bold flex items-center gap-1.5"
                 >
                   <Download className="w-4 h-4" />
-                  <span>تصدير بيانات الحساب (JSON)</span>
+                  <span>تصدير نسخة السيرفر (JSON)</span>
                 </button>
-                {selectedPlayer && (
-                  <label className="min-h-[42px] px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-amber-200 font-bold flex items-center gap-1.5 cursor-pointer">
-                    <Upload className="w-4 h-4" />
-                    <span>استيراد واستعادة للحساب</span>
-                    <input
-                      type="file"
-                      accept="application/json,.json"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (!file || !selectedPlayer) return;
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                          onRestoreBackupSnapshot(
-                            String(reader.result ?? ''),
-                            selectedPlayer.accountId
-                          );
-                          setBackupFeedback(`تمت استعادة البيانات من الملف "${file.name}" إلى D1.`);
-                        };
-                        reader.readAsText(file);
-                        e.target.value = '';
-                      }}
-                      className="hidden"
-                    />
-                  </label>
-                )}
+                <label className="min-h-[42px] px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-amber-200 font-bold flex items-center gap-1.5 cursor-pointer">
+                  <Upload className="w-4 h-4" />
+                  <span>استيراد واستعادة سيرفر (JSON)</span>
+                  <input
+                    type="file"
+                    accept="application/json,.json"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      const reader = new FileReader();
+                      reader.onload = () => {
+                        void onRestoreBackupSnapshot({
+                          payloadJson: String(reader.result ?? ''),
+                        }).then((ok) => {
+                          if (ok) {
+                            setBackupFeedback(
+                              `تمت استعادة السيرفر من الملف "${file.name}" إلى D1 بنجاح.`
+                            );
+                          }
+                        });
+                      };
+                      reader.readAsText(file);
+                      e.target.value = '';
+                    }}
+                    className="hidden"
+                  />
+                </label>
               </div>
 
               {backupFeedback && (
@@ -2849,61 +3237,74 @@ export const AdminDashboardView: React.FC<{
 
               {backupSnapshots.length === 0 ? (
                 <div className="p-8 text-center text-slate-400">
-                  لم يتم إنشاء أي نسخة احتياطية في D1 بعد. اضغط «إنشاء نسخة في D1» لحفظ لقطة فورية.
+                  لم يتم إنشاء أي نسخة احتياطية في D1 بعد. اضغط «إنشاء نسخة للسيرفر في D1» لحفظ لقطة فورية كاملة.
                 </div>
               ) : (
                 <div className="divide-y divide-slate-800/70">
-                  {backupSnapshots.map((snap) => (
-                    <div
-                      key={snap.id}
-                      className="p-3.5 sm:px-4 flex flex-wrap items-center justify-between gap-3"
-                    >
-                      <div className="space-y-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-num font-bold text-amber-300">{snap.id}</span>
-                          <span className="font-bold text-slate-100">{snap.label}</span>
+                  {backupSnapshots.map((snap) => {
+                    const isLegacy = snap.backupType === 'legacy_player_snapshot';
+                    return (
+                      <div
+                        key={snap.id}
+                        className="p-3.5 sm:px-4 flex flex-wrap items-center justify-between gap-3"
+                      >
+                        <div className="space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-num font-bold text-amber-300">{snap.id}</span>
+                            <span className="font-bold text-slate-100">{snap.label}</span>
+                            <span
+                              className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                                isLegacy
+                                  ? 'bg-slate-800 text-slate-300 border border-slate-700'
+                                  : 'bg-emerald-500/15 text-emerald-300 border border-emerald-400/40'
+                              }`}
+                            >
+                              {isLegacy
+                                ? 'نسخة حساب قديمة'
+                                : `سيرفر: ${snap.serverName || snap.serverId || 'المنصة'}`}
+                            </span>
+                            {typeof snap.playersCount === 'number' && !isLegacy && (
+                              <span className="px-2 py-0.5 rounded-md text-[10px] font-num font-bold bg-sky-500/15 text-sky-300 border border-sky-400/35">
+                                {snap.playersCount} لاعب
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-slate-400 font-num">
+                            النطاق: {snap.commanderName} · الإيراد المعتمد: {formatNumber(snap.totalSarApproved)} ريال · {formatKsaDateTime(snap.createdAt)}
+                          </div>
                         </div>
-                        <div className="text-[11px] text-slate-400 font-num">
-                          القائد: {snap.commanderName} · الإيراد المعتمد: {formatNumber(snap.totalSarApproved)} ريال · {formatKsaDateTime(snap.createdAt)}
-                        </div>
-                      </div>
 
-                      <div className="flex flex-wrap items-center gap-2 shrink-0">
-                        <button
-                          type="button"
-                          disabled={busyAction}
-                          onClick={() => {
-                            let targetId = selectedPlayer?.accountId ?? '';
-                            try {
-                              const parsed = JSON.parse(snap.payloadJson) as { accountId?: string };
-                              if (parsed.accountId) targetId = parsed.accountId;
-                            } catch {
-                              // ignore
-                            }
-                            if (!targetId) {
-                              setBackupFeedback('يرجى اختيار حساب لاعب أولاً للاستعادة.');
-                              return;
-                            }
-                            onRestoreBackupSnapshot(snap.payloadJson, targetId);
-                            setBackupFeedback(`تمت استعادة النسخة الاحتياطية ${snap.id} إلى D1.`);
-                          }}
-                          className="min-h-[38px] px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold flex items-center gap-1"
-                        >
-                          <RotateCcw className="w-3.5 h-3.5" />
-                          <span>استعادة</span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busyAction}
-                          onClick={() => onDeleteBackupSnapshot(snap.id)}
-                          className="min-h-[38px] px-3 py-1.5 rounded-xl bg-rose-950/60 hover:bg-rose-900/70 border border-rose-500/40 text-rose-200 font-bold flex items-center gap-1"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          <span>حذف</span>
-                        </button>
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            disabled={busyAction}
+                            onClick={() => {
+                              void onRestoreBackupSnapshot({ backupId: snap.id }).then((ok) => {
+                                if (ok) {
+                                  setBackupFeedback(
+                                    `تمت استعادة النسخة الاحتياطية ${snap.id} بالكامل إلى D1.`
+                                  );
+                                }
+                              });
+                            }}
+                            className="min-h-[38px] px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold flex items-center gap-1"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            <span>{isLegacy ? 'استعادة' : 'استعادة السيرفر بالكامل'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busyAction}
+                            onClick={() => onDeleteBackupSnapshot(snap.id)}
+                            className="min-h-[38px] px-3 py-1.5 rounded-xl bg-rose-950/60 hover:bg-rose-900/70 border border-rose-500/40 text-rose-200 font-bold flex items-center gap-1"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>حذف</span>
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

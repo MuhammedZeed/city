@@ -8,6 +8,8 @@ import {
   AdminRole,
   FinancialCategory,
   GameState,
+  PlayerRegistrationStatus,
+  SpeedUpTierId,
   TicketStatus,
 } from "@enginora/shared";
 import {
@@ -585,4 +587,195 @@ export function restoreGameStateFromJson(
     return { error: 'تعذر قراءة ملف النسخة الاحتياطية بصيغة JSON.' };
   }
 }
+
+export type AdminSubAction = 'keep' | 'add_30d' | 'add_90d' | 'disable';
+export type AdminShieldAction =
+  | 'keep'
+  | 'add_24h'
+  | 'add_3d'
+  | 'add_7d'
+  | 'add_30d'
+  | 'clear';
+
+export interface AdminPlayerAccountPatch {
+  commanderName: string;
+  cityName: string;
+  selectedServerId: string;
+  registrationStatus: PlayerRegistrationStatus;
+  chargedGems: number;
+  bonusGems: number;
+  marketGems: number;
+  tradeBalance: number;
+  achievementPoints: number;
+  wheat: number;
+  wood: number;
+  iron: number;
+  crudeOilStock: number;
+  naturalGasStock: number;
+  hakimAction: AdminSubAction;
+  vipAction: AdminSubAction;
+  shieldAction: AdminShieldAction;
+  speedUpCards: Record<SpeedUpTierId, number>;
+}
+
+function cleanDecimal(value: number): number {
+  return Math.max(0, Number.isFinite(value) ? Number(value.toFixed(2)) : 0);
+}
+
+function cleanInt(value: number): number {
+  return Math.max(0, Number.isFinite(value) ? Math.floor(value) : 0);
+}
+
+export function adminUpdatePlayerAccount(
+  state: GameState,
+  patch: AdminPlayerAccountPatch,
+  role: AdminRole,
+  now: number
+): { state: GameState; error?: string } {
+  if (role !== 'founder') {
+    return {
+      state,
+      error: 'التعديل الكامل لبيانات حساب اللاعب حصري لحساب المؤسس (Founder).',
+    };
+  }
+
+  const commanderName = patch.commanderName.trim() || state.commanderName;
+  const cityName = patch.cityName.trim() || state.cityName;
+  const selectedServerId =
+    patch.selectedServerId || state.selectedServerId || DEFAULT_GAME_SERVERS[0].id;
+
+  const gemLedger = {
+    chargedGems: cleanDecimal(patch.chargedGems),
+    bonusGems: cleanDecimal(patch.bonusGems),
+    marketGems: cleanDecimal(patch.marketGems),
+  };
+
+  let hakimSubscription = { ...state.hakimSubscription };
+  let smartBotActive = state.smartBotActive;
+  let smartBotExpiresAt = state.smartBotExpiresAt;
+  let botConfig = { ...state.botConfig };
+
+  if (patch.hakimAction === 'disable') {
+    hakimSubscription = {
+      ...hakimSubscription,
+      active: false,
+      expiresAt: null,
+    };
+    smartBotActive = false;
+    smartBotExpiresAt = null;
+  } else if (patch.hakimAction === 'add_30d' || patch.hakimAction === 'add_90d') {
+    const days = patch.hakimAction === 'add_90d' ? 90 : 30;
+    const baseEnd = Math.max(
+      now,
+      state.hakimSubscription.expiresAt ?? state.smartBotExpiresAt ?? 0
+    );
+    const nextExp = baseEnd + days * DAY_MS;
+    hakimSubscription = {
+      active: true,
+      startedAt: state.hakimSubscription.startedAt ?? now,
+      expiresAt: nextExp,
+      renewCount: state.hakimSubscription.renewCount + 1,
+    };
+    smartBotActive = true;
+    smartBotExpiresAt = nextExp;
+    botConfig = { ...botConfig, autoDevelopCity: true };
+  } else {
+    const hasPaidHakim =
+      Boolean(hakimSubscription.active) &&
+      typeof hakimSubscription.expiresAt === 'number' &&
+      hakimSubscription.expiresAt > now;
+    if (!hasPaidHakim) {
+      hakimSubscription = { ...hakimSubscription, active: false };
+      smartBotActive = false;
+      smartBotExpiresAt = null;
+    }
+  }
+
+  let vipSubscription = { ...state.vipSubscription };
+  if (patch.vipAction === 'disable') {
+    vipSubscription = {
+      ...vipSubscription,
+      active: false,
+      expiresAt: null,
+    };
+  } else if (patch.vipAction === 'add_30d' || patch.vipAction === 'add_90d') {
+    const days = patch.vipAction === 'add_90d' ? 90 : 30;
+    const baseEnd = Math.max(now, state.vipSubscription.expiresAt ?? 0);
+    vipSubscription = {
+      active: true,
+      startedAt: state.vipSubscription.startedAt ?? now,
+      expiresAt: baseEnd + days * DAY_MS,
+      renewCount: state.vipSubscription.renewCount + 1,
+    };
+  }
+
+  let shieldEndsAt = state.shieldEndsAt;
+  if (patch.shieldAction === 'clear') {
+    shieldEndsAt = null;
+  } else if (patch.shieldAction !== 'keep') {
+    const hoursMap: Record<Exclude<AdminShieldAction, 'keep' | 'clear'>, number> = {
+      add_24h: 24,
+      add_3d: 72,
+      add_7d: 168,
+      add_30d: 720,
+    };
+    const hours = hoursMap[patch.shieldAction];
+    const baseShield = Math.max(now, state.shieldEndsAt ?? 0);
+    shieldEndsAt = baseShield + hours * 60 * 60 * 1000;
+  }
+
+  const speedUpTiers: SpeedUpTierId[] = ['1m', '5m', '30m', '1h', '24h', '3d', '7d'];
+  const speedUpCards = { ...state.speedUpCards };
+  for (const tier of speedUpTiers) {
+    speedUpCards[tier] = cleanInt(patch.speedUpCards[tier] ?? state.speedUpCards[tier] ?? 0);
+  }
+
+  let next: GameState = {
+    ...state,
+    commanderName,
+    cityName,
+    selectedServerId,
+    registration: {
+      ...state.registration,
+      status: patch.registrationStatus,
+      nickname: commanderName,
+      serverId: selectedServerId,
+    },
+    gemLedger,
+    ledger: {
+      ...state.ledger,
+      paidGems: cleanDecimal(gemLedger.chargedGems + gemLedger.bonusGems + gemLedger.marketGems),
+      tradeBalance: cleanDecimal(patch.tradeBalance),
+      achievementPoints: cleanInt(patch.achievementPoints),
+    },
+    resources: {
+      wheat: cleanInt(patch.wheat),
+      wood: cleanInt(patch.wood),
+      iron: cleanInt(patch.iron),
+    },
+    maritime: {
+      ...state.maritime,
+      crudeOilStock: cleanInt(patch.crudeOilStock),
+      naturalGasStock: cleanInt(patch.naturalGasStock),
+    },
+    hakimSubscription,
+    vipSubscription,
+    smartBotActive,
+    smartBotExpiresAt,
+    botConfig,
+    shieldEndsAt,
+    speedUpCards,
+  };
+
+  next = appendAuditLog(
+    next,
+    role,
+    'تعديل شامل لبيانات اللاعب',
+    `${commanderName} (${next.accountId}) — جواهر: ${next.ledger.paidGems} | سيرفر: ${selectedServerId} | حكيم: ${patch.hakimAction} | VIP: ${patch.vipAction}`,
+    now
+  );
+
+  return { state: next };
+}
+
 

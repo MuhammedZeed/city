@@ -10,16 +10,19 @@ import {
 } from 'lucide-react';
 import {
   API_ENDPOINTS,
+  AdminBackupRestoreResponse,
   AdminBackupSnapshot,
   AdminBackupsResponse,
   AdminConfig,
   AdminConfigUpdateResponse,
+  AdminCredentialsResponse,
   AdminLoginResponse,
   AdminOverviewResponse,
   AdminPlayerRecord,
   AdminPlayerStateUpdateResponse,
   AdminResetPasswordResponse,
   AdminRole,
+  AdminRoleCredentialStatus,
   ApiClientError,
   DEFAULT_ADMIN_CONFIG,
   TicketAttachment,
@@ -31,12 +34,12 @@ import {
 } from '@enginora/shared';
 import { AdminDashboardView } from './components/AdminDashboardView';
 import {
+  AdminPlayerAccountPatch,
   adminReverseMarketOfferOrTrade,
   adminReviewPaymentOrder,
   adminReviewPlayerRegistration,
   adminToggleMarketFreeze,
-  buildAdminBackupPayload,
-  restoreGameStateFromJson,
+  adminUpdatePlayerAccount,
   updateAdminConfig,
   updateSupportTicketStatus,
 } from './engine/adminEngine';
@@ -76,7 +79,11 @@ export default function App() {
   );
   const [players, setPlayers] = useState<AdminPlayerRecord[]>([]);
   const [selectedPlayerId, setSelectedPlayerId] = useState<string>('');
+  const [selectedBackupServerId, setSelectedBackupServerId] = useState<string>(
+    DEFAULT_ADMIN_CONFIG.servers[0]?.id ?? 'ALL'
+  );
   const [backupSnapshots, setBackupSnapshots] = useState<AdminBackupSnapshot[]>([]);
+  const [roleCredentials, setRoleCredentials] = useState<AdminRoleCredentialStatus[]>([]);
   const [now, setNow] = useState<number>(() => Date.now());
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [busyAction, setBusyAction] = useState(false);
@@ -115,6 +122,7 @@ export default function App() {
       setAdminToken(null);
       setPlayers([]);
       setBackupSnapshots([]);
+      setRoleCredentials([]);
       setLoginPassword('');
       setLoginError(msg || 'انتهت الجلسة الإدارية. يرجى تسجيل الدخول مرة أخرى.');
     },
@@ -137,7 +145,25 @@ export default function App() {
           if (prev && res.players.some((p) => p.accountId === prev)) return prev;
           return res.players[0]?.accountId ?? '';
         });
+        setSelectedBackupServerId((prev) => {
+          if (prev === 'ALL') return 'ALL';
+          if (prev && res.adminConfig.servers.some((s) => s.id === prev)) return prev;
+          return res.adminConfig.servers[0]?.id ?? 'ALL';
+        });
         setBackupSnapshots(Array.isArray(res.backups) ? res.backups : []);
+        if (res.role === 'founder') {
+          try {
+            const credRes = await apiRequest<AdminCredentialsResponse>(
+              API_ENDPOINTS.adminCredentials,
+              { token }
+            );
+            setRoleCredentials(Array.isArray(credRes.credentials) ? credRes.credentials : []);
+          } catch {
+            // Keep overview alive even if credentials fetch is momentarily unavailable
+          }
+        } else {
+          setRoleCredentials([]);
+        }
       } catch (err) {
         if (err instanceof ApiClientError && err.status === 401) {
           handleUnauthorized(err.message);
@@ -201,6 +227,7 @@ export default function App() {
     setAdminToken(null);
     setPlayers([]);
     setBackupSnapshots([]);
+    setRoleCredentials([]);
     setSelectedPlayerId('');
     setLoginPassword('');
     setLoginError(null);
@@ -370,6 +397,18 @@ export default function App() {
     );
   };
 
+  const handleAdminUpdatePlayerAccount = (
+    accountId: string,
+    patch: AdminPlayerAccountPatch
+  ): Promise<boolean> => {
+    return persistPlayerMutation(
+      accountId,
+      (player) =>
+        adminUpdatePlayerAccount(player.state, patch, adminRole, Date.now()),
+      'تم حفظ التعديلات الشاملة على حساب اللاعب في Cloudflare D1 بنجاح.'
+    );
+  };
+
   const handleUpdateAdminConfig = async (
     patch: Partial<AdminConfig>,
     summary: string
@@ -510,29 +549,87 @@ export default function App() {
     }
   };
 
+  const handleSaveRoleCredential = async (
+    targetRole: AdminRole,
+    newPassword: string
+  ): Promise<{ error?: string }> => {
+    const token = tokenRef.current;
+    if (!token) {
+      handleUnauthorized();
+      return { error: 'انتهت الجلسة الإدارية.' };
+    }
+    setBusyAction(true);
+    try {
+      const res = await apiRequest<AdminCredentialsResponse>(
+        API_ENDPOINTS.adminCredentials,
+        {
+          method: 'POST',
+          token,
+          body: { role: targetRole, newPassword },
+        }
+      );
+      setRoleCredentials(res.credentials);
+      pushToast(
+        targetRole === 'founder'
+          ? 'تم تحديث كلمة مرور المؤسس وإنهاء الجلسات الأخرى بنجاح.'
+          : 'تم تعيين كلمة مرور مستقلة للصلاحية وإنهاء جلساتها السابقة بنجاح.',
+        'success'
+      );
+      return {};
+    } catch (err) {
+      if (err instanceof ApiClientError && err.status === 401) {
+        handleUnauthorized(err.message);
+      }
+      const message =
+        err instanceof Error ? err.message : 'تعذر تحديث كلمة مرور الصلاحية.';
+      pushToast(message, 'error');
+      return { error: message };
+    } finally {
+      setBusyAction(false);
+    }
+  };
+
+  const handleResetRoleCredential = async (
+    targetRole: AdminRole
+  ): Promise<{ error?: string }> => {
+    const token = tokenRef.current;
+    if (!token) {
+      handleUnauthorized();
+      return { error: 'انتهت الجلسة الإدارية.' };
+    }
+    setBusyAction(true);
+    try {
+      const res = await apiRequest<AdminCredentialsResponse>(
+        API_ENDPOINTS.adminCredentials,
+        {
+          method: 'POST',
+          token,
+          body: { role: targetRole, resetToEnv: true },
+        }
+      );
+      setRoleCredentials(res.credentials);
+      pushToast('تمت إعادة ضبط كلمة المرور للاعتماد على متغير الخادم (Secret).', 'info');
+      return {};
+    } catch (err) {
+      if (err instanceof ApiClientError && err.status === 401) {
+        handleUnauthorized(err.message);
+      }
+      const message =
+        err instanceof Error ? err.message : 'تعذر إعادة ضبط كلمة مرور الصلاحية.';
+      pushToast(message, 'error');
+      return { error: message };
+    } finally {
+      setBusyAction(false);
+    }
+  };
+
   const handleCreateBackupSnapshot = async (
     label: string,
-    targetAccountId: string
+    serverId: string
   ) => {
     const token = tokenRef.current;
     if (!token) {
       handleUnauthorized();
-      return;
-    }
-    const target = players.find((p) => p.accountId === targetAccountId);
-    if (!target) {
-      pushToast('يرجى اختيار حساب لاعب أولاً.', 'error');
-      return;
-    }
-
-    const payload = buildAdminBackupPayload(
-      target.state,
-      adminRole,
-      label,
-      Date.now()
-    );
-    if (payload.error) {
-      pushToast(payload.error, 'error');
       return;
     }
 
@@ -542,15 +639,13 @@ export default function App() {
         method: 'POST',
         token,
         body: {
-          label: payload.label,
-          createdBy: payload.createdBy,
-          totalSarApproved: payload.totalSarApproved,
-          commanderName: payload.commanderName,
-          payloadJson: payload.payloadJson,
+          serverId: serverId || 'ALL',
+          label: label.trim(),
+          createdBy: 'المؤسس (Founder)',
         },
       });
       setBackupSnapshots(res.backups);
-      pushToast('تم إنشاء النسخة الاحتياطية وحفظها في قاعدة D1 بنجاح.', 'success');
+      pushToast('تم إنشاء نسخة احتياطية كاملة للسيرفر وحفظها في قاعدة D1 بنجاح.', 'success');
     } catch (err) {
       if (err instanceof ApiClientError && err.status === 401) {
         handleUnauthorized(err.message);
@@ -565,30 +660,53 @@ export default function App() {
     }
   };
 
-  const handleRestoreBackupSnapshot = (
-    payloadJson: string,
-    targetAccountId: string
-  ) => {
-    const res = restoreGameStateFromJson(
-      payloadJson,
-      adminRole,
-      Date.now(),
-      targetAccountId
-    );
-    if (res.error || !res.state) {
-      pushToast(res.error ?? 'تعذر استعادة النسخة الاحتياطية.', 'error');
-      return;
+  const handleRestoreBackupSnapshot = async (opts: {
+    backupId?: string;
+    payloadJson?: string;
+  }): Promise<boolean> => {
+    if (adminRole !== 'founder') {
+      pushToast('استعادة النسخ الاحتياطية حصرية لحساب المؤسس (Founder).', 'error');
+      return false;
     }
-    const restoredState = res.state;
-    const effectiveAccountId =
-      players.find((p) => p.accountId === restoredState.accountId)?.accountId ??
-      targetAccountId;
-
-    void persistPlayerMutation(
-      effectiveAccountId,
-      () => ({ state: restoredState }),
-      'تمت استعادة بيانات الحساب من النسخة الاحتياطية وحفظها في D1.'
-    );
+    const token = tokenRef.current;
+    if (!token) {
+      handleUnauthorized();
+      return false;
+    }
+    setBusyAction(true);
+    try {
+      const res = await apiRequest<AdminBackupRestoreResponse>(
+        API_ENDPOINTS.adminBackupRestore,
+        {
+          method: 'POST',
+          token,
+          body: opts,
+        }
+      );
+      setAdminConfig(res.adminConfig);
+      setPlayers(res.players);
+      setSelectedPlayerId((prev) => {
+        if (prev && res.players.some((p) => p.accountId === prev)) return prev;
+        return res.players[0]?.accountId ?? '';
+      });
+      pushToast(
+        `تمت استعادة السيرفر "${res.serverName}" بالكامل (${res.restoredPlayersCount} لاعب) إلى D1 بنجاح.`,
+        'success'
+      );
+      return true;
+    } catch (err) {
+      if (err instanceof ApiClientError && err.status === 401) {
+        handleUnauthorized(err.message);
+      } else {
+        pushToast(
+          err instanceof Error ? err.message : 'تعذر استعادة النسخة الاحتياطية في D1.',
+          'error'
+        );
+      }
+      return false;
+    } finally {
+      setBusyAction(false);
+    }
   };
 
   const handleDeleteBackupSnapshot = async (snapshotId: string) => {
@@ -679,7 +797,7 @@ export default function App() {
                     بوابة الدخول الإداري الموثقة
                   </h1>
                   <p className="text-[11px] text-slate-400 mt-0.5">
-                    اختر الدور الوظيفي وأدخل كلمة المرور الإدارية للوصول إلى قاعدة D1
+                    اختر الدور الوظيفي وأدخل كلمة المرور المستقلة الخاصة بهذه الصلاحية للوصول إلى قاعدة D1
                   </p>
                 </div>
               </div>
@@ -709,7 +827,8 @@ export default function App() {
 
               <div className="space-y-1.5">
                 <label className="block font-bold text-slate-200">
-                  كلمة المرور الإدارية (ADMIN_PASSWORD)
+                  كلمة مرور{' '}
+                  {ROLE_OPTIONS.find((opt) => opt.id === loginRole)?.title ?? 'الدخول الإداري'}
                 </label>
                 <div className="relative">
                   <KeyRound className="w-4 h-4 text-amber-400 absolute right-3 top-1/2 -translate-y-1/2" />
@@ -718,7 +837,7 @@ export default function App() {
                     required
                     value={loginPassword}
                     onChange={(e) => setLoginPassword(e.target.value)}
-                    placeholder="أدخل كلمة المرور الإدارية..."
+                    placeholder="أدخل كلمة مرور هذه الصلاحية..."
                     className="w-full min-h-[44px] pr-9 pl-10 py-2 rounded-xl bg-slate-950/90 border border-slate-700 text-slate-100"
                   />
                   <button
@@ -758,6 +877,11 @@ export default function App() {
             players={players}
             selectedPlayerId={selectedPlayerId}
             onSelectPlayer={setSelectedPlayerId}
+            selectedBackupServerId={selectedBackupServerId}
+            onSelectBackupServer={setSelectedBackupServerId}
+            roleCredentials={roleCredentials}
+            onSaveRoleCredential={handleSaveRoleCredential}
+            onResetRoleCredential={handleResetRoleCredential}
             now={now}
             adminRole={adminRole}
             backupSnapshots={backupSnapshots}
@@ -766,6 +890,7 @@ export default function App() {
             onRefreshOverview={() => void fetchOverview(undefined, false)}
             onReviewPaymentOrder={handleAdminReviewPaymentOrder}
             onReviewRegistration={handleAdminReviewRegistration}
+            onUpdatePlayerAccount={handleAdminUpdatePlayerAccount}
             onResetPlayerPassword={handleResetPlayerPassword}
             onCreateBackupSnapshot={handleCreateBackupSnapshot}
             onRestoreBackupSnapshot={handleRestoreBackupSnapshot}
