@@ -132,7 +132,7 @@ export function adminReviewPaymentOrder(
       createdAt: now,
     });
     next = appendAuditLog(
-      next,
+      { ...next, lastAdminSyncAt: now },
       role,
       'اعتماد طلب دفع',
       `${order.id} — ${order.productTitle} (${order.amountSar} ريال)`,
@@ -474,7 +474,7 @@ export function adminReviewPlayerRegistration(
   }
 
   next = appendAuditLog(
-    next,
+    { ...next, lastAdminSyncAt: now },
     role,
     decision === 'approve' ? 'قبول تسجيل لاعب جديد' : 'رفض تسجيل لاعب جديد',
     `${state.registration.fullName} (${state.registration.nickname}) — هوية ${state.registration.nationalId}`,
@@ -732,6 +732,8 @@ export function adminUpdatePlayerAccount(
 
   let next: GameState = {
     ...state,
+    lastTickAt: now,
+    lastAdminSyncAt: now,
     commanderName,
     cityName,
     selectedServerId,

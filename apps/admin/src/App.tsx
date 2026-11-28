@@ -412,11 +412,11 @@ export default function App() {
   const handleUpdateAdminConfig = async (
     patch: Partial<AdminConfig>,
     summary: string
-  ) => {
+  ): Promise<boolean> => {
     const token = tokenRef.current;
     if (!token) {
       handleUnauthorized();
-      return;
+      return false;
     }
 
     const baseState = players[0]?.state;
@@ -430,11 +430,11 @@ export default function App() {
       );
       if (check.error) {
         pushToast(check.error, 'error');
-        return;
+        return false;
       }
     } else if (adminRole !== 'founder') {
       pushToast('تعديل الأسعار أو السيرفرات أو الإعدادات العامة حصري للمؤسس.', 'error');
-      return;
+      return false;
     }
 
     const nextConfig: AdminConfig = {
@@ -457,6 +457,7 @@ export default function App() {
         }))
       );
       pushToast('تم حفظ الإعدادات وتحديث جميع السيرفرات والأسعار في D1.', 'success');
+      return true;
     } catch (err) {
       if (err instanceof ApiClientError && err.status === 401) {
         handleUnauthorized(err.message);
@@ -466,6 +467,7 @@ export default function App() {
           'error'
         );
       }
+      return false;
     } finally {
       setBusyAction(false);
     }

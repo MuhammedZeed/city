@@ -70,14 +70,33 @@ export const PlayerAccountEditorCard: React.FC<{
     buildInitialDraft(player)
   );
   const [saving, setSaving] = useState(false);
+  const [isDirty, setIsDirty] = useState(false);
+  const [syncedAccountId, setSyncedAccountId] = useState(player.accountId);
+  const [syncedRevision, setSyncedRevision] = useState(player.revision);
   const [feedback, setFeedback] = useState<{ text: string; isError?: boolean } | null>(
     null
   );
 
   useEffect(() => {
-    setDraft(buildInitialDraft(player));
+    if (player.accountId !== syncedAccountId) {
+      setDraft(buildInitialDraft(player));
+      setSyncedAccountId(player.accountId);
+      setSyncedRevision(player.revision);
+      setIsDirty(false);
+      setFeedback(null);
+      return;
+    }
+    if (!isDirty && player.revision !== syncedRevision) {
+      setDraft(buildInitialDraft(player));
+      setSyncedRevision(player.revision);
+    }
+  }, [player, player.accountId, player.revision, isDirty, syncedAccountId, syncedRevision]);
+
+  const updateDraft = (updater: (prev: AdminPlayerAccountPatch) => AdminPlayerAccountPatch) => {
+    setIsDirty(true);
     setFeedback(null);
-  }, [player.accountId, player.revision]);
+    setDraft(updater);
+  };
 
   const hakimActive =
     Boolean(player.state.hakimSubscription?.active) &&
@@ -105,8 +124,10 @@ export const PlayerAccountEditorCard: React.FC<{
     const ok = await onUpdatePlayerAccount(player.accountId, draft);
     setSaving(false);
     if (ok) {
+      setIsDirty(false);
+      setSyncedRevision(player.revision);
       setFeedback({
-        text: `تم حفظ تعديلات حساب ${draft.commanderName || player.commanderName} في Cloudflare D1 بنجاح.`,
+        text: `تم حفظ تعديلات حساب ${draft.commanderName || player.commanderName} في Cloudflare D1 وسيتحدّث عند اللاعب تلقائيًا.`,
       });
     } else {
       setFeedback({
@@ -143,7 +164,7 @@ export const PlayerAccountEditorCard: React.FC<{
           <input
             type="text"
             value={draft.commanderName}
-            onChange={(e) => setDraft((d) => ({ ...d, commanderName: e.target.value }))}
+            onChange={(e) => updateDraft((d) => ({ ...d, commanderName: e.target.value }))}
             className="w-full min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-700 text-slate-100"
           />
         </label>
@@ -152,7 +173,7 @@ export const PlayerAccountEditorCard: React.FC<{
           <input
             type="text"
             value={draft.cityName}
-            onChange={(e) => setDraft((d) => ({ ...d, cityName: e.target.value }))}
+            onChange={(e) => updateDraft((d) => ({ ...d, cityName: e.target.value }))}
             className="w-full min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-700 text-slate-100"
           />
         </label>
@@ -160,7 +181,7 @@ export const PlayerAccountEditorCard: React.FC<{
           <span className="text-slate-300 font-semibold block">السيرفر</span>
           <select
             value={draft.selectedServerId}
-            onChange={(e) => setDraft((d) => ({ ...d, selectedServerId: e.target.value }))}
+            onChange={(e) => updateDraft((d) => ({ ...d, selectedServerId: e.target.value }))}
             className="w-full min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-700 text-sky-300 font-bold"
           >
             {adminConfig.servers.map((srv) => (
@@ -175,7 +196,7 @@ export const PlayerAccountEditorCard: React.FC<{
           <select
             value={draft.registrationStatus}
             onChange={(e) =>
-              setDraft((d) => ({
+              updateDraft((d) => ({
                 ...d,
                 registrationStatus: e.target.value as PlayerRegistrationStatus,
               }))
@@ -210,7 +231,7 @@ export const PlayerAccountEditorCard: React.FC<{
               step="0.01"
               value={draft.chargedGems}
               onChange={(e) =>
-                setDraft((d) => ({ ...d, chargedGems: Number(e.target.value) || 0 }))
+                updateDraft((d) => ({ ...d, chargedGems: Number(e.target.value) || 0 }))
               }
               className="w-full min-h-[38px] px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-amber-300 font-bold"
             />
@@ -223,7 +244,7 @@ export const PlayerAccountEditorCard: React.FC<{
               step="0.01"
               value={draft.bonusGems}
               onChange={(e) =>
-                setDraft((d) => ({ ...d, bonusGems: Number(e.target.value) || 0 }))
+                updateDraft((d) => ({ ...d, bonusGems: Number(e.target.value) || 0 }))
               }
               className="w-full min-h-[38px] px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-sky-300 font-bold"
             />
@@ -236,7 +257,7 @@ export const PlayerAccountEditorCard: React.FC<{
               step="0.01"
               value={draft.marketGems}
               onChange={(e) =>
-                setDraft((d) => ({ ...d, marketGems: Number(e.target.value) || 0 }))
+                updateDraft((d) => ({ ...d, marketGems: Number(e.target.value) || 0 }))
               }
               className="w-full min-h-[38px] px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-emerald-300 font-bold"
             />
@@ -249,7 +270,7 @@ export const PlayerAccountEditorCard: React.FC<{
               step="0.01"
               value={draft.tradeBalance}
               onChange={(e) =>
-                setDraft((d) => ({ ...d, tradeBalance: Number(e.target.value) || 0 }))
+                updateDraft((d) => ({ ...d, tradeBalance: Number(e.target.value) || 0 }))
               }
               className="w-full min-h-[38px] px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-purple-300 font-bold"
             />
@@ -262,7 +283,7 @@ export const PlayerAccountEditorCard: React.FC<{
               step="1"
               value={draft.achievementPoints}
               onChange={(e) =>
-                setDraft((d) => ({
+                updateDraft((d) => ({
                   ...d,
                   achievementPoints: Math.max(0, Math.floor(Number(e.target.value) || 0)),
                 }))
@@ -288,7 +309,7 @@ export const PlayerAccountEditorCard: React.FC<{
               step="1"
               value={draft.wheat}
               onChange={(e) =>
-                setDraft((d) => ({
+                updateDraft((d) => ({
                   ...d,
                   wheat: Math.max(0, Math.floor(Number(e.target.value) || 0)),
                 }))
@@ -304,7 +325,7 @@ export const PlayerAccountEditorCard: React.FC<{
               step="1"
               value={draft.wood}
               onChange={(e) =>
-                setDraft((d) => ({
+                updateDraft((d) => ({
                   ...d,
                   wood: Math.max(0, Math.floor(Number(e.target.value) || 0)),
                 }))
@@ -320,7 +341,7 @@ export const PlayerAccountEditorCard: React.FC<{
               step="1"
               value={draft.iron}
               onChange={(e) =>
-                setDraft((d) => ({
+                updateDraft((d) => ({
                   ...d,
                   iron: Math.max(0, Math.floor(Number(e.target.value) || 0)),
                 }))
@@ -336,7 +357,7 @@ export const PlayerAccountEditorCard: React.FC<{
               step="1"
               value={draft.crudeOilStock}
               onChange={(e) =>
-                setDraft((d) => ({
+                updateDraft((d) => ({
                   ...d,
                   crudeOilStock: Math.max(0, Math.floor(Number(e.target.value) || 0)),
                 }))
@@ -352,7 +373,7 @@ export const PlayerAccountEditorCard: React.FC<{
               step="1"
               value={draft.naturalGasStock}
               onChange={(e) =>
-                setDraft((d) => ({
+                updateDraft((d) => ({
                   ...d,
                   naturalGasStock: Math.max(0, Math.floor(Number(e.target.value) || 0)),
                 }))
@@ -382,7 +403,7 @@ export const PlayerAccountEditorCard: React.FC<{
             <select
               value={draft.hakimAction}
               onChange={(e) =>
-                setDraft((d) => ({ ...d, hakimAction: e.target.value as AdminSubAction }))
+                updateDraft((d) => ({ ...d, hakimAction: e.target.value as AdminSubAction }))
               }
               className="w-full min-h-[38px] px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-100"
             >
@@ -403,7 +424,7 @@ export const PlayerAccountEditorCard: React.FC<{
             <select
               value={draft.vipAction}
               onChange={(e) =>
-                setDraft((d) => ({ ...d, vipAction: e.target.value as AdminSubAction }))
+                updateDraft((d) => ({ ...d, vipAction: e.target.value as AdminSubAction }))
               }
               className="w-full min-h-[38px] px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-100"
             >
@@ -427,7 +448,7 @@ export const PlayerAccountEditorCard: React.FC<{
             <select
               value={draft.shieldAction}
               onChange={(e) =>
-                setDraft((d) => ({
+                updateDraft((d) => ({
                   ...d,
                   shieldAction: e.target.value as AdminShieldAction,
                 }))
@@ -463,7 +484,7 @@ export const PlayerAccountEditorCard: React.FC<{
                 value={draft.speedUpCards[tier]}
                 onChange={(e) => {
                   const val = Math.max(0, Math.floor(Number(e.target.value) || 0));
-                  setDraft((d) => ({
+                  updateDraft((d) => ({
                     ...d,
                     speedUpCards: { ...d.speedUpCards, [tier]: val },
                   }));
@@ -476,18 +497,40 @@ export const PlayerAccountEditorCard: React.FC<{
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-        <button
-          type="submit"
-          disabled={saving || busyAction}
-          className="min-h-[42px] px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-60 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition-colors"
-        >
-          <Save className="w-4 h-4" />
-          <span>
-            {saving || busyAction
-              ? "جارٍ الحفظ في D1..."
-              : "حفظ جميع تعديلات حساب اللاعب في D1"}
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="submit"
+            disabled={saving || busyAction}
+            className="min-h-[42px] px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-60 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition-colors"
+          >
+            <Save className="w-4 h-4" />
+            <span>
+              {saving || busyAction
+                ? "جارٍ الحفظ في D1..."
+                : "حفظ جميع تعديلات حساب اللاعب في D1"}
+            </span>
+          </button>
+          {isDirty && (
+            <button
+              type="button"
+              disabled={saving || busyAction}
+              onClick={() => {
+                setDraft(buildInitialDraft(player));
+                setSyncedRevision(player.revision);
+                setIsDirty(false);
+                setFeedback(null);
+              }}
+              className="min-h-[42px] px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-[11px]"
+            >
+              تجاهل ومزامنة أحدث بيانات
+            </button>
+          )}
+        </div>
+        {isDirty && (
+          <span className="text-[11px] font-bold text-amber-300">
+            يوجد تعديلات غير محفوظة في نموذج اللاعب
           </span>
-        </button>
+        )}
       </div>
 
       {feedback && (

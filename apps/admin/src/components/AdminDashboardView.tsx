@@ -237,7 +237,10 @@ export const AdminDashboardView: React.FC<{
     freeze: boolean,
     reason: string
   ) => void;
-  onUpdateAdminConfig: (patch: Partial<AdminConfig>, summary: string) => void;
+  onUpdateAdminConfig: (
+    patch: Partial<AdminConfig>,
+    summary: string
+  ) => Promise<boolean> | boolean | void;
   onReplySupportTicket: (
     accountId: string,
     ticketId: string,
@@ -315,6 +318,12 @@ export const AdminDashboardView: React.FC<{
   const [ticketStatusFilter, setTicketStatusFilter] = useState<'all' | TicketStatus>('all');
   const [supportReplyMap, setSupportReplyMap] = useState<Record<string, string>>({});
   const [configDraft, setConfigDraft] = useState<AdminConfig>(adminConfig);
+  const [configDirty, setConfigDirty] = useState(false);
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [configSaveFeedback, setConfigSaveFeedback] = useState<{
+    text: string;
+    isError?: boolean;
+  } | null>(null);
   const [newServerCode, setNewServerCode] = useState('S3');
   const [newServerName, setNewServerName] = useState('');
   const [newServerCapacity, setNewServerCapacity] = useState(150);
@@ -337,8 +346,38 @@ export const AdminDashboardView: React.FC<{
   } | null>(null);
 
   useEffect(() => {
-    setConfigDraft(adminConfig);
-  }, [adminConfig]);
+    if (!configDirty) {
+      setConfigDraft(adminConfig);
+    }
+  }, [adminConfig, configDirty]);
+
+  const updateConfigDraft = (updater: (prev: AdminConfig) => AdminConfig) => {
+    setConfigDirty(true);
+    setConfigSaveFeedback(null);
+    setConfigDraft(updater);
+  };
+
+  const handleSaveConfigDraft = async (summary: string) => {
+    if (!isFounder || savingConfig) return;
+    setSavingConfig(true);
+    setConfigSaveFeedback(null);
+    try {
+      const res = await onUpdateAdminConfig(configDraft, summary);
+      if (res !== false) {
+        setConfigDirty(false);
+        setConfigSaveFeedback({
+          text: 'تم حفظ وسائل الدفع والأسعار في Cloudflare D1 وتفعيلها فورًا لدى اللاعبين.',
+        });
+      } else {
+        setConfigSaveFeedback({
+          text: 'تعذر حفظ التعديلات في قاعدة البيانات. يرجى المحاولة مجددًا.',
+          isError: true,
+        });
+      }
+    } finally {
+      setSavingConfig(false);
+    }
+  };
 
   useEffect(() => {
     if (adminRole === 'support' && tab !== 'tickets' && tab !== 'players') {
@@ -2016,41 +2055,94 @@ export const AdminDashboardView: React.FC<{
                     صفحة الأسعار الشاملة ووسائل الدفع والخصومات
                   </h3>
                   <p className="text-slate-400 mt-0.5">
-                    عدّل أسعار جميع المنتجات (التسجيل، باقات الجواهر، الاشتراكات، الدروع، التسريع، السوق) وحدد وسائل الدفع المفعلة ونسبة الخصم لكل وسيلة.
+                    {isFounder
+                      ? 'عدّل أسعار جميع المنتجات (التسجيل، باقات الجواهر، الاشتراكات، الدروع، التسريع، السوق) وحدد وسائل الدفع وبيانات التحويل لتظهر فورًا في اللعبة.'
+                      : 'صلاحية الشريك: اطلاع للقراءة فقط على الأسعار ووسائل الدفع المعتمدة من المؤسس (تتحدث تلقائيًا من D1).'}
                   </p>
                 </div>
-                {isFounder && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      onUpdateAdminConfig(
-                        configDraft,
-                        'تحديث جدول الأسعار ووسائل الدفع والخصومات وإعدادات السوق'
-                      )
-                    }
-                    className="min-h-[42px] px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow"
-                  >
-                    حفظ وتطبيق جميع الأسعار
-                  </button>
+                {isFounder ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    {configDirty && (
+                      <>
+                        <span className="px-2.5 py-1 rounded-lg bg-amber-500/20 border border-amber-400/50 text-amber-200 font-bold text-[11px]">
+                          يوجد تعديلات غير محفوظة
+                        </span>
+                        <button
+                          type="button"
+                          disabled={savingConfig || busyAction}
+                          onClick={() => {
+                            setConfigDraft(adminConfig);
+                            setConfigDirty(false);
+                            setConfigSaveFeedback(null);
+                          }}
+                          className="min-h-[42px] px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold"
+                        >
+                          إلغاء التعديلات
+                        </button>
+                      </>
+                    )}
+                    <button
+                      type="button"
+                      disabled={savingConfig || busyAction}
+                      onClick={() =>
+                        void handleSaveConfigDraft(
+                          'تحديث جدول الأسعار ووسائل الدفع والخصومات وإعدادات السوق'
+                        )
+                      }
+                      className="min-h-[42px] px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold shadow"
+                    >
+                      {savingConfig || busyAction ? 'جارٍ الحفظ في D1...' : 'حفظ وتطبيق جميع الأسعار'}
+                    </button>
+                  </div>
+                ) : (
+                  <span className="px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-300 font-semibold">
+                    عرض فقط (الشريك)
+                  </span>
                 )}
               </div>
+
+              {configSaveFeedback && (
+                <div
+                  className={`p-3 rounded-xl border text-xs font-semibold ${
+                    configSaveFeedback.isError
+                      ? 'bg-rose-950/60 border-rose-500/50 text-rose-200'
+                      : 'bg-emerald-950/60 border-emerald-500/50 text-emerald-200'
+                  }`}
+                >
+                  {configSaveFeedback.text}
+                </div>
+              )}
 
               {/* 1. Payment Methods & Per-Method Discount */}
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h4 className="font-bold text-slate-100 text-sm flex items-center gap-1.5">
-                    <CreditCard className="w-4 h-4 text-sky-300" />
-                    <span>وسائل الدفع المتاحة والخصم المخصص لكل وسيلة</span>
-                  </h4>
-                  <span className="text-[11px] text-slate-400">
-                    أدخل نسبة الخصم (%) بجانب أي وسيلة دفع لتخفيض السعر تلقائيًا عند اختيارها في الدفع
-                  </span>
+                  <div>
+                    <h4 className="font-bold text-slate-100 text-sm flex items-center gap-1.5">
+                      <CreditCard className="w-4 h-4 text-sky-300" />
+                      <span>وسائل الدفع المتاحة والخصم المخصص لكل وسيلة</span>
+                    </h4>
+                    <span className="text-[11px] text-slate-400">
+                      أدخل بيانات التحويل ونسبة الخصم ثم اضغط حفظ لتظهر فورًا للاعبين عند الشحن أو التسجيل
+                    </span>
+                  </div>
+                  {isFounder && (
+                    <button
+                      type="button"
+                      disabled={savingConfig || busyAction}
+                      onClick={() =>
+                        void handleSaveConfigDraft('حفظ وتحديث بيانات وسائل الدفع في D1')
+                      }
+                      className="min-h-[38px] px-4 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-60 text-white font-bold text-[11px]"
+                    >
+                      {savingConfig ? 'جارٍ الحفظ...' : 'حفظ وسائل الدفع الآن'}
+                    </button>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   {(Object.keys(PAYMENT_METHODS_META) as PaymentMethodId[]).map((mId) => {
                     const meta = PAYMENT_METHODS_META[mId];
-                    const pm = configDraft.paymentMethods?.[mId] ?? {
+                    const fallbackPm = {
                       id: mId,
                       enabled: true,
                       discountPct: 0,
@@ -2061,6 +2153,7 @@ export const AdminDashboardView: React.FC<{
                       paymentLink: '',
                       instructions: '',
                     };
+                    const pm = configDraft.paymentMethods?.[mId] ?? fallbackPm;
                     const updatePmField = (
                       field:
                         | 'bankOrNetwork'
@@ -2071,16 +2164,19 @@ export const AdminDashboardView: React.FC<{
                         | 'instructions',
                       value: string
                     ) => {
-                      setConfigDraft((p) => ({
-                        ...p,
-                        paymentMethods: {
-                          ...p.paymentMethods,
-                          [mId]: {
-                            ...pm,
-                            [field]: value,
+                      updateConfigDraft((p) => {
+                        const currentPm = p.paymentMethods?.[mId] ?? fallbackPm;
+                        return {
+                          ...p,
+                          paymentMethods: {
+                            ...p.paymentMethods,
+                            [mId]: {
+                              ...currentPm,
+                              [field]: value,
+                            },
                           },
-                        },
-                      }));
+                        };
+                      });
                     };
                     const sampleAfter = Number(
                       (
@@ -2104,16 +2200,19 @@ export const AdminDashboardView: React.FC<{
                             type="button"
                             disabled={!isFounder}
                             onClick={() =>
-                              setConfigDraft((p) => ({
-                                ...p,
-                                paymentMethods: {
-                                  ...p.paymentMethods,
-                                  [mId]: {
-                                    ...pm,
-                                    enabled: !pm.enabled,
+                              updateConfigDraft((p) => {
+                                const currentPm = p.paymentMethods?.[mId] ?? fallbackPm;
+                                return {
+                                  ...p,
+                                  paymentMethods: {
+                                    ...p.paymentMethods,
+                                    [mId]: {
+                                      ...currentPm,
+                                      enabled: !currentPm.enabled,
+                                    },
                                   },
-                                },
-                              }))
+                                };
+                              })
                             }
                             className={`px-3 py-1.5 rounded-lg text-[11px] font-bold shrink-0 ${
                               pm.enabled
@@ -2143,16 +2242,19 @@ export const AdminDashboardView: React.FC<{
                                   0,
                                   Math.min(90, Number(e.target.value) || 0)
                                 );
-                                setConfigDraft((p) => ({
-                                  ...p,
-                                  paymentMethods: {
-                                    ...p.paymentMethods,
-                                    [mId]: {
-                                      ...pm,
-                                      discountPct: val,
+                                updateConfigDraft((p) => {
+                                  const currentPm = p.paymentMethods?.[mId] ?? fallbackPm;
+                                  return {
+                                    ...p,
+                                    paymentMethods: {
+                                      ...p.paymentMethods,
+                                      [mId]: {
+                                        ...currentPm,
+                                        discountPct: val,
+                                      },
                                     },
-                                  },
-                                }));
+                                  };
+                                });
                               }}
                               className="w-24 min-h-[36px] px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-700 text-emerald-300 font-bold text-center"
                             />
@@ -2268,7 +2370,7 @@ export const AdminDashboardView: React.FC<{
                       disabled={!isFounder}
                       value={configDraft.registrationFeeSar}
                       onChange={(e) =>
-                        setConfigDraft((p) => ({
+                        updateConfigDraft((p) => ({
                           ...p,
                           registrationFeeSar: Math.max(0, Number(e.target.value) || 0),
                         }))
@@ -2284,7 +2386,7 @@ export const AdminDashboardView: React.FC<{
                       disabled={!isFounder}
                       value={configDraft.hakimPriceSar}
                       onChange={(e) =>
-                        setConfigDraft((p) => ({
+                        updateConfigDraft((p) => ({
                           ...p,
                           hakimPriceSar: Math.max(0, Number(e.target.value) || 0),
                         }))
@@ -2300,7 +2402,7 @@ export const AdminDashboardView: React.FC<{
                       disabled={!isFounder}
                       value={configDraft.hakimDurationDays}
                       onChange={(e) =>
-                        setConfigDraft((p) => ({
+                        updateConfigDraft((p) => ({
                           ...p,
                           hakimDurationDays: Math.max(1, Number(e.target.value) || 90),
                         }))
@@ -2317,7 +2419,7 @@ export const AdminDashboardView: React.FC<{
                       disabled={!isFounder}
                       value={configDraft.vipPriceSar}
                       onChange={(e) =>
-                        setConfigDraft((p) => ({
+                        updateConfigDraft((p) => ({
                           ...p,
                           vipPriceSar: Math.max(0, Number(e.target.value) || 0),
                         }))
@@ -2334,7 +2436,7 @@ export const AdminDashboardView: React.FC<{
                       disabled={!isFounder}
                       value={configDraft.vipPriceUsd}
                       onChange={(e) =>
-                        setConfigDraft((p) => ({
+                        updateConfigDraft((p) => ({
                           ...p,
                           vipPriceUsd: Math.max(0, Number(e.target.value) || 0),
                         }))
@@ -2350,7 +2452,7 @@ export const AdminDashboardView: React.FC<{
                       disabled={!isFounder}
                       value={configDraft.vipDurationDays}
                       onChange={(e) =>
-                        setConfigDraft((p) => ({
+                        updateConfigDraft((p) => ({
                           ...p,
                           vipDurationDays: Math.max(1, Number(e.target.value) || 30),
                         }))
@@ -2375,7 +2477,7 @@ export const AdminDashboardView: React.FC<{
                         disabled={!isFounder}
                         value={pack.name}
                         onChange={(e) =>
-                          setConfigDraft((p) => ({
+                          updateConfigDraft((p) => ({
                             ...p,
                             gemPackages: p.gemPackages.map((g, i) =>
                               i === idx ? { ...g, name: e.target.value } : g
@@ -2392,7 +2494,7 @@ export const AdminDashboardView: React.FC<{
                             disabled={!isFounder}
                             value={pack.baseGems}
                             onChange={(e) =>
-                              setConfigDraft((p) => ({
+                              updateConfigDraft((p) => ({
                                 ...p,
                                 gemPackages: p.gemPackages.map((g, i) =>
                                   i === idx
@@ -2411,7 +2513,7 @@ export const AdminDashboardView: React.FC<{
                             disabled={!isFounder}
                             value={pack.bonusGems}
                             onChange={(e) =>
-                              setConfigDraft((p) => ({
+                              updateConfigDraft((p) => ({
                                 ...p,
                                 gemPackages: p.gemPackages.map((g, i) =>
                                   i === idx
@@ -2431,7 +2533,7 @@ export const AdminDashboardView: React.FC<{
                             disabled={!isFounder}
                             value={pack.priceSar}
                             onChange={(e) =>
-                              setConfigDraft((p) => ({
+                              updateConfigDraft((p) => ({
                                 ...p,
                                 gemPackages: p.gemPackages.map((g, i) =>
                                   i === idx
@@ -2464,7 +2566,7 @@ export const AdminDashboardView: React.FC<{
                         disabled={!isFounder}
                         value={configDraft.shieldPricesGems[pkg.id]}
                         onChange={(e) =>
-                          setConfigDraft((p) => ({
+                          updateConfigDraft((p) => ({
                             ...p,
                             shieldPricesGems: {
                               ...p.shieldPricesGems,
@@ -2486,7 +2588,7 @@ export const AdminDashboardView: React.FC<{
                       disabled={!isFounder}
                       value={configDraft.attackBoostGems}
                       onChange={(e) =>
-                        setConfigDraft((p) => ({
+                        updateConfigDraft((p) => ({
                           ...p,
                           attackBoostGems: Math.max(1, Number(e.target.value) || 100),
                         }))
@@ -2501,7 +2603,7 @@ export const AdminDashboardView: React.FC<{
                       disabled={!isFounder}
                       value={configDraft.defenseBoostGems}
                       onChange={(e) =>
-                        setConfigDraft((p) => ({
+                        updateConfigDraft((p) => ({
                           ...p,
                           defenseBoostGems: Math.max(1, Number(e.target.value) || 100),
                         }))
@@ -2516,7 +2618,7 @@ export const AdminDashboardView: React.FC<{
                       disabled={!isFounder}
                       value={configDraft.instantFinishGemsPerBlock}
                       onChange={(e) =>
-                        setConfigDraft((p) => ({
+                        updateConfigDraft((p) => ({
                           ...p,
                           instantFinishGemsPerBlock: Math.max(1, Number(e.target.value) || 100),
                         }))
@@ -2531,7 +2633,7 @@ export const AdminDashboardView: React.FC<{
                       disabled={!isFounder}
                       value={configDraft.marchSpeedUpGemsPerMin}
                       onChange={(e) =>
-                        setConfigDraft((p) => ({
+                        updateConfigDraft((p) => ({
                           ...p,
                           marchSpeedUpGemsPerMin: Math.max(1, Number(e.target.value) || 50),
                         }))
@@ -2552,7 +2654,7 @@ export const AdminDashboardView: React.FC<{
                           disabled={!isFounder}
                           value={configDraft.speedUpGemCosts[tier]}
                           onChange={(e) =>
-                            setConfigDraft((p) => ({
+                            updateConfigDraft((p) => ({
                               ...p,
                               speedUpGemCosts: {
                                 ...p.speedUpGemCosts,
@@ -2578,7 +2680,7 @@ export const AdminDashboardView: React.FC<{
                       disabled={!isFounder}
                       value={configDraft.marketFeePct}
                       onChange={(e) =>
-                        setConfigDraft((p) => ({ ...p, marketFeePct: Number(e.target.value) || 0 }))
+                        updateConfigDraft((p) => ({ ...p, marketFeePct: Number(e.target.value) || 0 }))
                       }
                       className="w-full min-h-[38px] px-2.5 py-1.5 rounded-xl bg-slate-950/85 border border-slate-700 text-slate-100"
                     />
@@ -2590,7 +2692,7 @@ export const AdminDashboardView: React.FC<{
                       disabled={!isFounder}
                       value={configDraft.tradePointsPer100NetGems}
                       onChange={(e) =>
-                        setConfigDraft((p) => ({
+                        updateConfigDraft((p) => ({
                           ...p,
                           tradePointsPer100NetGems: Math.max(1, Number(e.target.value) || 80),
                         }))
@@ -2623,7 +2725,7 @@ export const AdminDashboardView: React.FC<{
                             type="button"
                             disabled={!isFounder}
                             onClick={() =>
-                              setConfigDraft((p) => ({
+                              updateConfigDraft((p) => ({
                                 ...p,
                                 resourcePriceBounds: {
                                   ...p.resourcePriceBounds,
@@ -2656,7 +2758,7 @@ export const AdminDashboardView: React.FC<{
                               value={rb.referencePrice}
                               onChange={(e) => {
                                 const ref = Math.max(0.1, Number(e.target.value) || 1);
-                                setConfigDraft((p) => ({
+                                updateConfigDraft((p) => ({
                                   ...p,
                                   resourcePriceBounds: {
                                     ...p.resourcePriceBounds,
@@ -2674,7 +2776,7 @@ export const AdminDashboardView: React.FC<{
                                 type="button"
                                 title="ضبط الحدود تلقائيًا 70% – 150% من المرجعي"
                                 onClick={() =>
-                                  setConfigDraft((p) => {
+                                  updateConfigDraft((p) => {
                                     const ref = p.resourcePriceBounds[rId].referencePrice;
                                     return {
                                       ...p,
@@ -2706,7 +2808,7 @@ export const AdminDashboardView: React.FC<{
                               disabled={!isFounder}
                               value={rb.min}
                               onChange={(e) =>
-                                setConfigDraft((p) => ({
+                                updateConfigDraft((p) => ({
                                   ...p,
                                   resourcePriceBounds: {
                                     ...p.resourcePriceBounds,
@@ -2728,7 +2830,7 @@ export const AdminDashboardView: React.FC<{
                               disabled={!isFounder}
                               value={rb.max}
                               onChange={(e) =>
-                                setConfigDraft((p) => ({
+                                updateConfigDraft((p) => ({
                                   ...p,
                                   resourcePriceBounds: {
                                     ...p.resourcePriceBounds,
