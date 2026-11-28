@@ -16,6 +16,7 @@ import {
   JsonObject,
   buildInitialPlayerState,
   createDefaultAdminConfig,
+  isLegacyPlateauMonthlyRewards,
 } from './defaults';
 import { EmailPurpose } from './email';
 
@@ -78,22 +79,51 @@ function normalizeAdminPaymentMethods(
 ): JsonObject {
   const parsedPm = asObject(rawPm) ?? {};
   const result: JsonObject = {};
+  const textFields = [
+    'note',
+    'bankOrNetwork',
+    'accountTitle',
+    'accountNumber',
+    'ibanOrAddress',
+    'instructions',
+  ] as const;
+
   for (const key of ['apple_pay', 'mada', 'bank_transfer', 'binance']) {
     const base = asObject(defaultPm[key]) ?? { id: key, enabled: true, discountPct: 0 };
     const incoming = asObject(parsedPm[key]) ?? {};
-    const merged: JsonObject = { ...base, ...incoming, id: key };
+    const merged: JsonObject = {
+      ...base,
+      ...incoming,
+      id: key,
+      enabled: incoming.enabled !== undefined ? incoming.enabled !== false : base.enabled !== false,
+      discountPct: Math.max(
+        0,
+        Math.min(90, clampNonNegativeFinite(incoming.discountPct ?? base.discountPct, 0))
+      ),
+    };
+    for (const field of textFields) {
+      merged[field] =
+        typeof merged[field] === 'string' ? merged[field].trim().slice(0, 400) : '';
+    }
     if (typeof merged.paymentLink === 'string') {
       const trimmedLink = merged.paymentLink.trim();
       if (!trimmedLink) {
         merged.paymentLink = '';
       } else {
+        const candidate = /^https?:\/\//i.test(trimmedLink)
+          ? trimmedLink
+          : !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmedLink)
+            ? `https://${trimmedLink}`
+            : trimmedLink;
         try {
-          const parsedUrl = new URL(trimmedLink);
+          const parsedUrl = new URL(candidate);
           merged.paymentLink = parsedUrl.protocol === 'https:' ? parsedUrl.toString() : '';
         } catch {
           merged.paymentLink = '';
         }
       }
+    } else {
+      merged.paymentLink = '';
     }
     result[key] = merged;
   }
@@ -120,14 +150,23 @@ export async function ensurePlatformConfig(
   if (!row?.config_json) return defaultCfg;
   try {
     const parsed = JSON.parse(row.config_json) as JsonObject;
-    return {
+    const upgradedRewards = isLegacyPlateauMonthlyRewards(parsed.monthlyRewards);
+    const normalized: JsonObject = {
       ...defaultCfg,
       ...parsed,
       paymentMethods: normalizeAdminPaymentMethods(
         parsed.paymentMethods,
         asObject(defaultCfg.paymentMethods) ?? {}
       ),
+      monthlyRewards: upgradedRewards ? defaultCfg.monthlyRewards : parsed.monthlyRewards,
     };
+    if (upgradedRewards) {
+      await db
+        .prepare('UPDATE platform_config SET config_json = ?, updated_at = ? WHERE id = ?')
+        .bind(JSON.stringify(normalized), now, 'default')
+        .run();
+    }
+    return normalized;
   } catch {
     return defaultCfg;
   }
@@ -140,6 +179,7 @@ export async function updatePlatformConfig(
 ): Promise<JsonObject> {
   const defaultCfg = createDefaultAdminConfig();
   const current = await ensurePlatformConfig(db, now);
+  const candidateRewards = nextConfig.monthlyRewards ?? current.monthlyRewards;
   const merged = {
     ...current,
     ...nextConfig,
@@ -147,6 +187,9 @@ export async function updatePlatformConfig(
       nextConfig.paymentMethods ?? current.paymentMethods,
       asObject(defaultCfg.paymentMethods) ?? {}
     ),
+    monthlyRewards: isLegacyPlateauMonthlyRewards(candidateRewards)
+      ? defaultCfg.monthlyRewards
+      : candidateRewards,
   };
   await db
     .prepare(
@@ -914,6 +957,9 @@ function sanitizeClientStateAgainstServer(params: {
     market: mergedMarket,
     adminAuditLogs: asArray(existingState.adminAuditLogs),
     financialLogs: [...clientFinLogs, ...existingFinLogs],
+    ...(typeof existingState.lastAdminSyncAt === 'number'
+      ? { lastAdminSyncAt: existingState.lastAdminSyncAt }
+      : {}),
   };
 }
 
@@ -947,7 +993,9 @@ export async function savePlayerStateSafely(
   }
 
   const existingState = JSON.parse(row.state_json) as JsonObject;
-  if (params.expectedRevision !== row.revision) {
+  const existingAdminSyncAt = Number(existingState.lastAdminSyncAt ?? 0);
+  const clientAdminSyncAt = Number(params.clientState.lastAdminSyncAt ?? 0);
+  if (params.expectedRevision !== row.revision || existingAdminSyncAt > clientAdminSyncAt) {
     return {
       ok: false,
       conflict: true,
@@ -1869,6 +1917,7 @@ export async function restoreServerBackupSafely(
         version: 3,
         accountId,
         adminConfig,
+        lastAdminSyncAt: params.now,
       };
       const serializedState = JSON.stringify(sanitizedState);
       if (serializedState.length > 1_600_000) continue;
@@ -2114,6 +2163,7 @@ export async function adminSavePlayerState(
       version: 3,
       accountId: params.accountId,
       adminConfig,
+      lastAdminSyncAt: params.now,
     };
   }
 
