@@ -447,6 +447,62 @@ export const StoreView: React.FC<StoreViewProps> = ({
               </div>
             </section>
 
+            {/* Active Payment Methods Preview (from Admin Config) */}
+            {!checkout && (
+              <section className="glass-panel p-4 rounded-2xl border-sky-500/35 space-y-2.5 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="font-bold text-slate-100 flex items-center gap-2">
+                    <CreditCard className="w-4 h-4 text-sky-300" />
+                    <span>وسائل الدفع المفعّلة حاليًا</span>
+                  </div>
+                  <span className="text-[11px] text-slate-400">
+                    تُحدَّث تلقائيًا من لوحة الإدارة وتظهر تفاصيل التحويل فور اختيار أي باقة
+                  </span>
+                </div>
+
+                {enabledPaymentMethods.length === 0 ? (
+                  <div className="p-3 rounded-xl bg-rose-950/50 border border-rose-500/40 text-rose-200 text-[11px]">
+                    جميع وسائل الدفع متوقفة مؤقتًا من الإدارة. يرجى التواصل مع الدعم الفني.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+                    {enabledPaymentMethods.map((mId) => {
+                      const meta = PAYMENT_METHODS_META[mId];
+                      const cfg = state.adminConfig.paymentMethods?.[mId];
+                      const discountPct = Number(cfg?.discountPct ?? 0);
+                      const detailLabel =
+                        cfg?.bankOrNetwork?.trim() ||
+                        cfg?.accountTitle?.trim() ||
+                        cfg?.accountNumber?.trim() ||
+                        cfg?.ibanOrAddress?.trim() ||
+                        'مفعّل — متاح عند الدفع';
+
+                      return (
+                        <div
+                          key={mId}
+                          className="glass-subpanel p-3 rounded-xl border border-slate-700/60 space-y-1"
+                        >
+                          <div className="flex items-center justify-between gap-1.5">
+                            <span className="font-bold text-slate-100">{meta.name}</span>
+                            {discountPct > 0 ? (
+                              <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/50 text-emerald-300 text-[10px] font-num font-bold">
+                                خصم {discountPct}%
+                              </span>
+                            ) : (
+                              <span className="px-1.5 py-0.5 rounded bg-sky-500/15 border border-sky-400/35 text-sky-300 text-[10px] font-bold">
+                                مفعّل
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-slate-300 truncate">{detailLabel}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            )}
+
             {/* Checkout Form Panel when item selected */}
             {checkout && (
               <form

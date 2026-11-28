@@ -150,6 +150,14 @@ function mergeAuthoritativeServerFields(
   const localPendingOrders = (local.paymentOrders ?? []).filter(
     (o) => o.status === 'pending' && !serverOrderIds.has(o.id)
   );
+  const serverAdminTs = Number(server.lastAdminSyncAt ?? 0);
+  const localAdminTs = Number(local.lastAdminSyncAt ?? 0);
+  const localAuditIds = new Set((local.adminAuditLogs ?? []).map((l) => l.id));
+  const serverNewAudit = (server.adminAuditLogs ?? []).some(
+    (l) => !localAuditIds.has(l.id)
+  );
+  const hasNewAdminSync = serverAdminTs > localAdminTs || serverNewAudit;
+
   return {
     ...local,
     accountId: server.accountId,
@@ -161,7 +169,30 @@ function mergeAuthoritativeServerFields(
     ledger: {
       ...local.ledger,
       paidGems: server.ledger?.paidGems ?? local.ledger.paidGems,
+      ...(hasNewAdminSync
+        ? {
+            tradeBalance: server.ledger?.tradeBalance ?? local.ledger.tradeBalance,
+            achievementPoints:
+              server.ledger?.achievementPoints ?? local.ledger.achievementPoints,
+          }
+        : {}),
     },
+    ...(hasNewAdminSync
+      ? {
+          commanderName: server.commanderName,
+          cityName: server.cityName,
+          resources: server.resources,
+          maritime: {
+            ...local.maritime,
+            crudeOilStock:
+              server.maritime?.crudeOilStock ?? local.maritime.crudeOilStock,
+            naturalGasStock:
+              server.maritime?.naturalGasStock ?? local.maritime.naturalGasStock,
+          },
+          shieldEndsAt: server.shieldEndsAt,
+          speedUpCards: server.speedUpCards,
+        }
+      : {}),
     hakimSubscription: server.hakimSubscription,
     vipSubscription: server.vipSubscription,
     smartBotActive: server.smartBotActive,
@@ -170,6 +201,7 @@ function mergeAuthoritativeServerFields(
     financialLogs: server.financialLogs,
     adminAuditLogs: server.adminAuditLogs,
     coopQuestClaims: server.coopQuestClaims ?? local.coopQuestClaims,
+    lastAdminSyncAt: server.lastAdminSyncAt ?? local.lastAdminSyncAt,
     market: {
       ...local.market,
       marketFrozenForPlayer: server.market?.marketFrozenForPlayer,
@@ -220,6 +252,11 @@ export default function App() {
     []
   );
 
+  const applyStateSync = useCallback((next: GameState) => {
+    stateRef.current = next;
+    setState(next);
+  }, []);
+
   const syncStateToServer = useCallback(
     async (opts?: { keepalive?: boolean; overrideState?: GameState }) => {
       const token = authTokenRef.current;
@@ -248,7 +285,7 @@ export default function App() {
         serverRevisionRef.current = res.revision;
         dirtyRef.current = false;
         const hydrated = hydrateLoadedState(res.state, res.serverTimeUtc || Date.now());
-        setState(hydrated);
+        applyStateSync(hydrated);
         return true;
       } catch (err) {
         if (err instanceof ApiClientError) {
@@ -259,11 +296,27 @@ export default function App() {
               err.payload.state as Partial<GameState>,
               Number(err.payload.serverTimeUtc ?? Date.now())
             );
+            const prevLocalAdminTs = Number(stateRef.current.lastAdminSyncAt ?? 0);
+            const srvAdminTs = Number(serverHydrated.lastAdminSyncAt ?? 0);
+            const adminUpdatedOnServer = srvAdminTs > prevLocalAdminTs;
+
             const merged = dirtyRef.current
               ? mergeAuthoritativeServerFields(stateRef.current, serverHydrated)
               : serverHydrated;
             const cleanMerged = stripInlineReceiptPreviews(merged);
-            setState(cleanMerged);
+
+            if (adminUpdatedOnServer) {
+              if (debounceTimerRef.current) {
+                window.clearTimeout(debounceTimerRef.current);
+                debounceTimerRef.current = null;
+              }
+              dirtyRef.current = false;
+              applyStateSync(cleanMerged);
+              pushToast('تم تحديث بيانات حسابك ومواردك من لوحة الإدارة.', 'info');
+              return true;
+            }
+
+            applyStateSync(cleanMerged);
             // Try saving merged state immediately under the latest revision
             if (dirtyRef.current && !opts?.keepalive) {
               try {
@@ -281,7 +334,7 @@ export default function App() {
                 );
                 serverRevisionRef.current = retry.revision;
                 dirtyRef.current = false;
-                setState(
+                applyStateSync(
                   hydrateLoadedState(retry.state, retry.serverTimeUtc || Date.now())
                 );
                 return true;
@@ -300,7 +353,7 @@ export default function App() {
         syncInFlightRef.current = false;
       }
     },
-    [pushToast]
+    [applyStateSync, pushToast]
   );
 
   const commitState = useCallback(
@@ -341,14 +394,18 @@ export default function App() {
           API_ENDPOINTS.gameConfig,
           { baseUrl: API_BASE_URL }
         );
-        setState((prev) => ({
-          ...prev,
-          adminConfig: cfgRes.adminConfig,
-          selectedServerId:
-            cfgRes.adminConfig.servers?.some((s) => s.id === prev.selectedServerId)
-              ? prev.selectedServerId
-              : cfgRes.adminConfig.servers?.[0]?.id ?? prev.selectedServerId,
-        }));
+        setState((prev) => {
+          const next: GameState = {
+            ...prev,
+            adminConfig: cfgRes.adminConfig,
+            selectedServerId:
+              cfgRes.adminConfig.servers?.some((s) => s.id === prev.selectedServerId)
+                ? prev.selectedServerId
+                : cfgRes.adminConfig.servers?.[0]?.id ?? prev.selectedServerId,
+          };
+          stateRef.current = next;
+          return next;
+        });
       } catch {
         // Ignore transient offline error
       }
@@ -367,7 +424,14 @@ export default function App() {
         { token, baseUrl: API_BASE_URL }
       );
       serverRevisionRef.current = res.revision;
-      setState(hydrateLoadedState(res.state, res.serverTimeUtc || Date.now()));
+      const hydrated = hydrateLoadedState(res.state, res.serverTimeUtc || Date.now());
+      const prevAdminSync = Number(stateRef.current.lastAdminSyncAt ?? 0);
+      const nextAdminSync = Number(hydrated.lastAdminSyncAt ?? 0);
+      const sameAccount = stateRef.current.accountId === hydrated.accountId;
+      applyStateSync(hydrated);
+      if (sameAccount && nextAdminSync > prevAdminSync) {
+        pushToast('تم تحديث بيانات حسابك ومواردك من لوحة الإدارة.', 'info');
+      }
     } catch (err) {
       if (err instanceof ApiClientError && err.status === 401) {
         setAuthToken(null);
@@ -377,24 +441,31 @@ export default function App() {
     } finally {
       setIsSyncBusy(false);
     }
-  }, [pushToast, syncStateToServer]);
+  }, [applyStateSync, pushToast, syncStateToServer]);
 
-  // Initial public config fetch & periodic refresh when logged out
+  // Initial public config fetch & fast periodic refresh so Admin edits arrive promptly
   useEffect(() => {
     void pullLatestFromServer();
-    const pollMs = authToken ? 15000 : 12000;
+    const pollMs = authToken ? 6000 : 8000;
     const id = window.setInterval(() => {
       void pullLatestFromServer();
     }, pollMs);
     return () => window.clearInterval(id);
   }, [authToken, pullLatestFromServer]);
 
-  // Flush dirty state safely on tab hide / close
+  // Flush dirty state on tab hide/close and pull fresh state immediately on tab focus/return
   useEffect(() => {
     const handleVisibility = () => {
-      if (document.visibilityState === 'hidden' && authTokenRef.current && dirtyRef.current) {
-        void syncStateToServer({ keepalive: true });
+      if (document.visibilityState === 'hidden') {
+        if (authTokenRef.current && dirtyRef.current) {
+          void syncStateToServer({ keepalive: true });
+        }
+      } else if (document.visibilityState === 'visible') {
+        void pullLatestFromServer();
       }
+    };
+    const handleFocus = () => {
+      void pullLatestFromServer();
     };
     const handlePageHide = () => {
       if (authTokenRef.current && dirtyRef.current) {
@@ -402,12 +473,14 @@ export default function App() {
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleFocus);
     window.addEventListener('pagehide', handlePageHide);
     return () => {
       document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleFocus);
       window.removeEventListener('pagehide', handlePageHide);
     };
-  }, [syncStateToServer]);
+  }, [pullLatestFromServer, syncStateToServer]);
 
   // 1-second deterministic world tick (local memory only; server syncs on mutations/checkpoints)
   useEffect(() => {
@@ -1419,7 +1492,7 @@ export default function App() {
         authRes.state,
         authRes.serverTimeUtc || currentNow
       );
-      setState(hydrated);
+      applyStateSync(hydrated);
 
       if (!uploadedOk && payload.receiptPreviewUrl) {
         // Fallback so receipt is never lost if /api/receipts transiently failed
@@ -1520,8 +1593,9 @@ export default function App() {
 
       serverRevisionRef.current = resolvedRevision;
       dirtyRef.current = false;
+      authTokenRef.current = loginRes.token;
       setAuthToken(loginRes.token);
-      setState(resolvedState);
+      applyStateSync(resolvedState);
       soundFx.play('claim', resolvedState.soundEnabled);
 
       if (resolvedState.registration.status === 'approved') {
