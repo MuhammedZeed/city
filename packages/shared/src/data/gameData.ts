@@ -998,55 +998,70 @@ export const MARKET_RESOURCES_META: Record<
   },
 };
 
+export function isLegacyPlateauMonthlyRewards(
+  list: MonthlyRewardDayConfig[] | undefined | null
+): boolean {
+  if (!Array.isArray(list) || list.length !== 30) return true;
+  if (list.some((r) => r.day < 30 && Number(r.vipGems) > 0)) return true;
+  const d1 = list[0];
+  const d5 = list[4];
+  const d6 = list[5];
+  const d10 = list[9];
+  if (!d1 || !d5 || !d6 || !d10) return true;
+  return (
+    Number(d1.freeWheat) === Number(d5.freeWheat) &&
+    Number(d6.freeWheat) === Number(d10.freeWheat) &&
+    Number(d1.vipWheat) === Number(d5.vipWheat)
+  );
+}
+
 export function createDefaultMonthlyRewards(): MonthlyRewardDayConfig[] {
   const days: MonthlyRewardDayConfig[] = [];
+  const speedLabelMap: Record<SpeedUpTierId, string> = {
+    '1m': '1 دقيقة',
+    '5m': '5 دقائق',
+    '30m': '30 دقيقة',
+    '1h': 'ساعة واحدة',
+    '24h': '24 ساعة',
+    '3d': '3 أيام',
+    '7d': '7 أيام',
+  };
+
   for (let d = 1; d <= 30; d++) {
-    const scale = 1 + Math.floor((d - 1) / 5) * 0.4;
     const isDay30 = d === 30;
     const isMajorMilestone = d % 10 === 0;
     const isMinorMilestone = d % 5 === 0;
+    const step = d - 1;
 
-    // Free track: suitable daily resources & speed-up cards (no gems)
+    // Free track: strictly increasing daily resources + escalating speed-up cards (no gems)
     const freeSpeed: SpeedUpTierId | undefined = isDay30
       ? '1h'
-      : d === 10 || d === 20
+      : d === 10 || d === 20 || d === 25
         ? '30m'
-        : isMinorMilestone
+        : isMinorMilestone || (d >= 16 && d % 2 === 0)
           ? '5m'
-          : d % 3 === 0
+          : d % 3 === 0 || d >= 22
             ? '1m'
             : undefined;
 
-    // Paid VIP track: rich resources & speed-ups on Days 1-29 (0 gems), ONLY Day 30 has 100 gems
-    const vipSpeed: SpeedUpTierId | undefined = isDay30
+    // Paid VIP track: rich strictly increasing daily resources + escalating speed-ups; Day 30 grants +100 gems
+    const vipSpeed: SpeedUpTierId = isDay30 || d === 25
       ? '24h'
-      : d === 25
-        ? '24h'
-        : d === 7 || d === 14 || d === 21 || d === 28
-          ? '1h'
-          : isMajorMilestone || isMinorMilestone
-            ? '30m'
-            : d % 2 === 0
-              ? '5m'
-              : '1m';
+      : d === 7 || d === 14 || d === 20 || d === 21 || d === 28
+        ? '1h'
+        : isMajorMilestone || isMinorMilestone || d >= 22
+          ? '30m'
+          : d >= 11 || d % 2 === 0
+            ? '5m'
+            : '1m';
 
-    const speedLabelMap: Record<SpeedUpTierId, string> = {
-      '1m': '1 دقيقة',
-      '5m': '5 دقائق',
-      '30m': '30 دقيقة',
-      '1h': 'ساعة واحدة',
-      '24h': '24 ساعة',
-      '3d': '3 أيام',
-      '7d': '7 أيام',
-    };
+    const freeWheat = Math.round((100 + step * 18 + Math.pow(step, 1.35) * 2.5) / 5) * 5;
+    const freeWood = Math.round((85 + step * 16 + Math.pow(step, 1.35) * 2.1) / 5) * 5;
+    const freeIron = Math.round((70 + step * 14 + Math.pow(step, 1.35) * 1.8) / 5) * 5;
 
-    const freeWheat = Math.round(110 * scale);
-    const freeWood = Math.round(95 * scale);
-    const freeIron = Math.round(80 * scale);
-
-    const vipWheat = Math.round(320 * scale);
-    const vipWood = Math.round(280 * scale);
-    const vipIron = Math.round(240 * scale);
+    const vipWheat = Math.round((300 + step * 55 + Math.pow(step, 1.38) * 7.5) / 5) * 5;
+    const vipWood = Math.round((260 + step * 48 + Math.pow(step, 1.38) * 6.5) / 5) * 5;
+    const vipIron = Math.round((220 + step * 42 + Math.pow(step, 1.38) * 5.6) / 5) * 5;
 
     days.push({
       day: d,
@@ -1058,7 +1073,7 @@ export function createDefaultMonthlyRewards(): MonthlyRewardDayConfig[] {
       freeWheat,
       freeWood,
       freeIron,
-      freeSpeedUpTier: freeSpeed,
+      ...(freeSpeed ? { freeSpeedUpTier: freeSpeed } : {}),
       vipLabel: isDay30
         ? 'الجائزة الكبرى (اليوم 30): 100 جوهرة + إمداد ملكي + تسريع 24 ساعة'
         : `حزمة VIP اليوم ${d} + بطاقة تسريع ${speedLabelMap[vipSpeed]}`,

@@ -31,6 +31,7 @@ import {
   WAREHOUSE_UPGRADE_TABLE,
   createInitialMarketOffers,
   generateInitialWorldMap,
+  isLegacyPlateauMonthlyRewards,
 } from '../data/gameData';
 import {
   AdminBackupSnapshot,
@@ -577,12 +578,9 @@ export function hydrateLoadedState(
               },
             },
             resourcePriceBounds: hydratedBounds,
-            monthlyRewards:
-              Array.isArray(savedCfg.monthlyRewards) &&
-              savedCfg.monthlyRewards.some((r) => r.day < 30 && r.vipGems > 0)
-                ? cloneAdminConfig(DEFAULT_ADMIN_CONFIG).monthlyRewards
-                : savedCfg.monthlyRewards ??
-                  cloneAdminConfig(DEFAULT_ADMIN_CONFIG).monthlyRewards,
+            monthlyRewards: isLegacyPlateauMonthlyRewards(savedCfg.monthlyRewards)
+              ? cloneAdminConfig(DEFAULT_ADMIN_CONFIG).monthlyRewards
+              : savedCfg.monthlyRewards,
           }
         : cloneAdminConfig(DEFAULT_ADMIN_CONFIG),
       selectedServerId:

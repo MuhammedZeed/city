@@ -655,4 +655,5 @@ export interface GameState {
   selectedServerId?: string;
   registration: PlayerRegistration;
   soundEnabled: boolean;
+  lastAdminSyncAt?: number;
 }
