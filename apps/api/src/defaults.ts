@@ -153,10 +153,54 @@ export function createDefaultAdminConfig(): JsonObject {
       },
     ],
     paymentMethods: {
-      apple_pay: { id: 'apple_pay', enabled: true, discountPct: 0 },
-      mada: { id: 'mada', enabled: true, discountPct: 0 },
-      bank_transfer: { id: 'bank_transfer', enabled: true, discountPct: 0 },
-      binance: { id: 'binance', enabled: true, discountPct: 0 },
+      apple_pay: {
+        id: 'apple_pay',
+        enabled: true,
+        discountPct: 0,
+        note: '',
+        bankOrNetwork: '',
+        accountTitle: '',
+        accountNumber: '',
+        ibanOrAddress: '',
+        paymentLink: '',
+        instructions: '',
+      },
+      mada: {
+        id: 'mada',
+        enabled: true,
+        discountPct: 0,
+        note: '',
+        bankOrNetwork: '',
+        accountTitle: '',
+        accountNumber: '',
+        ibanOrAddress: '',
+        paymentLink: '',
+        instructions: '',
+      },
+      bank_transfer: {
+        id: 'bank_transfer',
+        enabled: true,
+        discountPct: 0,
+        note: '',
+        bankOrNetwork: '',
+        accountTitle: '',
+        accountNumber: '',
+        ibanOrAddress: '',
+        paymentLink: '',
+        instructions: '',
+      },
+      binance: {
+        id: 'binance',
+        enabled: true,
+        discountPct: 0,
+        note: '',
+        bankOrNetwork: '',
+        accountTitle: '',
+        accountNumber: '',
+        ibanOrAddress: '',
+        paymentLink: '',
+        instructions: '',
+      },
     },
     resourcePriceBounds: {
       wheat: { referencePrice: 19, min: 13.3, max: 28.5, enabled: true },
@@ -429,6 +473,7 @@ export function buildInitialPlayerState(params: {
     marches: [],
     speedUpCards: { '1m': 2, '5m': 2, '30m': 0, '1h': 0, '24h': 0, '3d': 0, '7d': 0 },
     questClaims: {},
+    coopQuestClaims: {},
     dailyResetKey: getKsaDayKey(now),
     weeklyResetKey: getKsaWeekKey(now),
     reports: [
@@ -528,3 +573,139 @@ export function buildInitialPlayerState(params: {
     soundEnabled: true,
   };
 }
+
+export interface ApiCoopQuestDef {
+  id: string;
+  title: string;
+  description: string;
+  metricKey:
+    | 'total_building_upgrades'
+    | 'hq10_players'
+    | 'alliance_center_levels'
+    | 'total_research_levels'
+    | 'total_army_units'
+    | 'maritime_energy_stock';
+  unitLabel: string;
+  targetValue: number;
+  minHqRequired: number;
+  requiresAllianceCenter: boolean;
+  rewards: {
+    wheat: number;
+    wood: number;
+    iron: number;
+    achievementPoints: number;
+    speedUp?: { tier: string; count: number };
+  };
+}
+
+export const COOP_QUESTS_CATALOG: ApiCoopQuestDef[] = [
+  {
+    id: 'coop_builds_30',
+    title: 'حملة الإعمار الجماعية',
+    description:
+      'يتعاون جميع لاعبي السيرفر لإنجاز 30 ترقية مبنى إضافية إجمالاً (تُحتسب المستويات المطوّرة فوق مستوى البداية).',
+    metricKey: 'total_building_upgrades',
+    unitLabel: 'ترقية مبنى',
+    targetValue: 30,
+    minHqRequired: 10,
+    requiresAllianceCenter: true,
+    rewards: {
+      wheat: 1500,
+      wood: 1500,
+      iron: 1200,
+      achievementPoints: 120,
+      speedUp: { tier: '30m', count: 2 },
+    },
+  },
+  {
+    id: 'coop_hq10_3',
+    title: 'قادة النخبة — المستوى 10',
+    description:
+      'وصول 3 قادة على الأقل في نفس السيرفر إلى المبنى الرئيسي مستوى 10 لفتح عصر التحالفات الكبرى.',
+    metricKey: 'hq10_players',
+    unitLabel: 'قائد (HQ 10)',
+    targetValue: 3,
+    minHqRequired: 10,
+    requiresAllianceCenter: true,
+    rewards: {
+      wheat: 3200,
+      wood: 3200,
+      iron: 2800,
+      achievementPoints: 250,
+      speedUp: { tier: '1h', count: 1 },
+    },
+  },
+  {
+    id: 'coop_alliance_10',
+    title: 'الركيزة الدبلوماسية للسيرفر',
+    description:
+      'رفع مجموع مستويات مباني «مركز التحالف» لدى جميع لاعبي السيرفر إلى 10 مستويات مشتركة.',
+    metricKey: 'alliance_center_levels',
+    unitLabel: 'مستوى مركز تحالف',
+    targetValue: 10,
+    minHqRequired: 10,
+    requiresAllianceCenter: true,
+    rewards: {
+      wheat: 2800,
+      wood: 2800,
+      iron: 2400,
+      achievementPoints: 220,
+      speedUp: { tier: '1h', count: 1 },
+    },
+  },
+  {
+    id: 'coop_research_20',
+    title: 'مبادرة التفوق التقني',
+    description:
+      'إتمام 20 مستوى بحث علمي بشكل تراكمي بين جميع لاعبي السيرفر في مراكز الأبحاث.',
+    metricKey: 'total_research_levels',
+    unitLabel: 'مستوى بحث',
+    targetValue: 20,
+    minHqRequired: 10,
+    requiresAllianceCenter: true,
+    rewards: {
+      wheat: 2200,
+      wood: 2200,
+      iron: 2600,
+      achievementPoints: 180,
+      speedUp: { tier: '30m', count: 2 },
+    },
+  },
+  {
+    id: 'coop_army_500',
+    title: 'الجاهزية العسكرية المشتركة',
+    description:
+      'حشد وتدريب 500 وحدة عسكرية واستطلاعية في مجموع حاميات لاعبي السيرفر.',
+    metricKey: 'total_army_units',
+    unitLabel: 'وحدة عسكرية',
+    targetValue: 500,
+    minHqRequired: 10,
+    requiresAllianceCenter: true,
+    rewards: {
+      wheat: 2400,
+      wood: 2000,
+      iron: 3000,
+      achievementPoints: 200,
+      speedUp: { tier: '1h', count: 1 },
+    },
+  },
+  {
+    id: 'coop_energy_1500',
+    title: 'تحالف الطاقة البحرية',
+    description:
+      'تكوين مخزون مشترك قدره 1,500 وحدة من النفط الخام والغاز الطبيعي لدى لاعبي السيرفر.',
+    metricKey: 'maritime_energy_stock',
+    unitLabel: 'برميل/وحدة طاقة',
+    targetValue: 1500,
+    minHqRequired: 10,
+    requiresAllianceCenter: true,
+    rewards: {
+      wheat: 3600,
+      wood: 3400,
+      iron: 3400,
+      achievementPoints: 350,
+      speedUp: { tier: '24h', count: 1 },
+    },
+  },
+];
+

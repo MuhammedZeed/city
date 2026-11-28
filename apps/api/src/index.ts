@@ -1,5 +1,4 @@
 import {
-  constantTimeEqualText,
   hashPassword,
   normalizeEmail,
   normalizePhone,
@@ -7,23 +6,36 @@ import {
   verifyPassword,
 } from './auth';
 import {
+  AdminRoleType,
+  adminResetPlayerPassword,
   adminSavePlayerState,
+  claimPlayerCoopQuest,
+  createAdminBackup,
   createPlayerAccount,
+  createServerBackup,
   createSession,
+  deleteAdminBackup,
   deleteEmailCodeById,
   ensurePlatformConfig,
   findPlayerByEmail,
   findPlayerById,
-  findPlayerByPhone,
+  findPlayerByIdentifier,
+  getAdminCredentialsStatus,
+  getPlayerCoopQuestsStatus,
   getPlayerStateWithConfig,
   issueEmailCode,
+  listAdminBackups,
   listPlayersForAdmin,
   migrateLocalStateSafely,
   resetPlayerCitySafely,
   resolveSessionByToken,
+  restoreServerBackupSafely,
   revokeSessionByToken,
   savePlayerStateSafely,
+  setAdminRoleCredential,
+  submitPlayerPaymentOrderSafely,
   updatePlatformConfig,
+  verifyAdminRolePassword,
   verifyAndConsumeEmailCode,
 } from './db';
 import { JsonObject } from './defaults';
@@ -34,23 +46,27 @@ export interface Env extends EmailEnv {
   ENVIRONMENT?: string;
   ALLOWED_ORIGINS?: string;
   ADMIN_PASSWORD?: string;
+  ADMIN_FOUNDER_PASSWORD?: string;
+  ADMIN_PARTNER_PASSWORD?: string;
+  ADMIN_SUPPORT_PASSWORD?: string;
 }
 
 const API_VERSION = 2;
 const PROJECT_NAME = 'ENGINORA CITY';
-function emailVerificationEnabled(env: Env): boolean {
-  return Boolean(env.RESEND_API_KEY?.trim() && env.EMAIL_FROM?.trim());
-}let receiptsTableReady = false;
+
+let receiptsTableReady = false;
 async function ensureReceiptsTable(db: D1Database): Promise<void> {
   if (receiptsTableReady) return;
-  await db
-    .prepare(
+  await db.batch([
+    db.prepare(
       'CREATE TABLE IF NOT EXISTS receipts (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, mime TEXT NOT NULL, data_base64 TEXT NOT NULL, created_at INTEGER NOT NULL)'
-    )
-    .run();
+    ),
+    db.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_receipts_account ON receipts(account_id)'
+    ),
+  ]);
   receiptsTableReady = true;
 }
-
 
 function parseAllowedOrigins(raw?: string): Set<string> {
   const origins = new Set<string>();
@@ -387,78 +403,7 @@ export default {
           );
         }
 
-        // Player registered with email -> MUST verify email before receiving a game session
-        if (email && emailVerificationEnabled(env)) {
-          const otpResult = await issueEmailCode(env.DB, {
-            accountId: created.player.account_id,
-            email,
-            purpose: 'verify_email',
-            now,
-          });
-
-          if (!otpResult.ok) {
-            return jsonResponse(
-              {
-                ok: true,
-                accountId: created.player.account_id,
-                requiresEmailVerification: true,
-                emailVerified: false,
-                emailSent: false,
-                email,
-                error: otpResult.error,
-                serverTimeUtc: now,
-              },
-              201,
-              corsHeaders
-            );
-          }
-
-          const mailRes = await sendOtpEmail(env, {
-            to: email,
-            purpose: 'verify_email',
-            code: otpResult.code,
-            commanderName,
-          });
-
-          if (!mailRes.sent) {
-            // Remove unsent code so cooldown does not block once service is configured
-            await deleteEmailCodeById(env.DB, otpResult.codeId);
-            return jsonResponse(
-              {
-                ok: true,
-                accountId: created.player.account_id,
-                requiresEmailVerification: true,
-                emailVerified: false,
-                emailSent: false,
-                email,
-                emailError: mailRes.error,
-                message:
-                  'تم إنشاء الحساب بنجاح، لكن تعذر إرسال كود التأكيد عبر البريد حاليًا. لا يمكن الدخول قبل تأكيد البريد الإلكتروني.',
-                serverTimeUtc: now,
-              },
-              201,
-              corsHeaders
-            );
-          }
-
-          return jsonResponse(
-            {
-              ok: true,
-              accountId: created.player.account_id,
-              requiresEmailVerification: true,
-              emailVerified: false,
-              emailSent: true,
-              email,
-              message:
-                'تم إنشاء الحساب وإرسال كود التحقق (6 أرقام) إلى بريدك الإلكتروني. يرجى تأكيد البريد قبل تسجيل الدخول.',
-              serverTimeUtc: now,
-            },
-            201,
-            corsHeaders
-          );
-        }
-
-        // Player registered with phone only -> can enter immediately and add email later
+        // Immediate session on registration (no Resend email verification gate; Founder reviews account/password manually)
         const session = await createSession(env.DB, {
           subjectType: 'player',
           accountId: created.player.account_id,
@@ -472,9 +417,9 @@ export default {
             token: session.token,
             expiresAt: session.expiresAt,
             accountId: created.player.account_id,
-            email: null,
             email: created.player.email,
-            emailVerified: false,
+            phone: created.player.phone,
+            emailVerified: created.player.email_verified === 1,
             requiresEmailVerification: false,
             state: created.state,
             revision: created.revision,
@@ -662,19 +607,18 @@ export default {
 
         if (!rawIdentifier || !password) {
           return jsonResponse(
-            { ok: false, error: 'أدخل البريد الإلكتروني أو رقم الجوال وكلمة المرور.' },
+            { ok: false, error: 'أدخل البريد الإلكتروني أو رقم الجوال أو معرّف الحساب وكلمة المرور.' },
             400,
             corsHeaders
           );
         }
 
-        const asEmail = normalizeEmail(rawIdentifier);
-        const asPhone = asEmail ? null : normalizePhone(rawIdentifier);
-        const player = asEmail
-          ? await findPlayerByEmail(env.DB, asEmail)
-          : asPhone
-            ? await findPlayerByPhone(env.DB, asPhone)
-            : null;
+        const player = await findPlayerByIdentifier(
+          env.DB,
+          rawIdentifier,
+          normalizeEmail,
+          normalizePhone
+        );
 
         if (!player) {
           return jsonResponse(
@@ -693,20 +637,6 @@ export default {
           return jsonResponse(
             { ok: false, error: 'بيانات الدخول غير صحيحة.' },
             401,
-            corsHeaders
-          );
-        }
-
-         if (emailVerificationEnabled(env) && player.email && player.email_verified !== 1) {
-          return jsonResponse(
-            {
-              ok: false,
-              code: 'EMAIL_NOT_VERIFIED',
-              requiresEmailVerification: true,
-              email: player.email,
-              error: 'يجب تأكيد البريد الإلكتروني بالكود أولًا قبل تسجيل الدخول.',
-            },
-            403,
             corsHeaders
           );
         }
@@ -756,80 +686,14 @@ export default {
             { Allow: 'POST, OPTIONS' }
           );
         }
-        const body = await readJsonBody(request);
-        const email = normalizeEmail(body?.email);
-        if (!email) {
-          return jsonResponse(
-            { ok: false, error: 'أدخل بريدًا إلكترونيًا صالحًا.' },
-            400,
-            corsHeaders
-          );
-        }
-
-        // Fail honestly if Resend isn't configured yet so we never claim an email was sent
-        if (!env.RESEND_API_KEY?.trim() || !env.EMAIL_FROM?.trim()) {
-          return jsonResponse(
-            {
-              ok: false,
-              emailSent: false,
-              error:
-                'خدمة إرسال البريد الإلكتروني غير مفعلة بعد على الخادم (مطلوب إعداد RESEND_API_KEY وEMAIL_FROM).',
-            },
-            503,
-            corsHeaders
-          );
-        }
-
-        const player = await findPlayerByEmail(env.DB, email);
-        if (!player || player.email_verified !== 1) {
-          return jsonResponse(
-            {
-              ok: true,
-              emailSent: false,
-              message:
-                'إذا كان هذا البريد الإلكتروني مسجلًا ومؤكدًا في النظام، فسيصلك كود استعادة كلمة المرور خلال لحظات.',
-            },
-            200,
-            corsHeaders
-          );
-        }
-
-        const otpResult = await issueEmailCode(env.DB, {
-          accountId: player.account_id,
-          email,
-          purpose: 'reset_password',
-          now,
-        });
-        if (!otpResult.ok) {
-          return jsonResponse(
-            { ok: false, emailSent: false, error: otpResult.error },
-            otpResult.status,
-            corsHeaders
-          );
-        }
-
-        const mailRes = await sendOtpEmail(env, {
-          to: email,
-          purpose: 'reset_password',
-          code: otpResult.code,
-          commanderName: player.commander_name,
-        });
-
-        if (!mailRes.sent) {
-          await deleteEmailCodeById(env.DB, otpResult.codeId);
-          return jsonResponse(
-            { ok: false, emailSent: false, error: mailRes.error },
-            mailRes.status,
-            corsHeaders
-          );
-        }
-
         return jsonResponse(
           {
-            ok: true,
-            emailSent: true,
-            message: 'تم إرسال كود استعادة كلمة المرور إلى بريدك الإلكتروني.',
-            serverTimeUtc: now,
+            ok: false,
+            manualAdminReset: true,
+            message:
+              'استعادة كلمة المرور تتم يدويًا عبر التواصل مع الإدارة من لوحة الإدارة لإعادة تعيين كلمة المرور.',
+            error:
+              'تواصل مع الإدارة لتعديل كلمة المرور يدويًا من لوحة الإدارة.',
           },
           200,
           corsHeaders
@@ -1014,7 +878,7 @@ export default {
         );
       }
 
-     // Payment receipts stored as real images (/api/receipts)
+      // Payment receipts stored as dedicated binary images (/api/receipts)
       if (path === '/api/receipts' || path.startsWith('/api/receipts/')) {
         const rToken = extractBearerToken(request);
         const rSession = rToken
@@ -1058,7 +922,7 @@ export default {
               corsHeaders
             );
           }
-          if (rMatch[2].length > 600000) {
+          if (rMatch[2].length > 600_000) {
             return jsonResponse(
               { ok: false, error: 'صورة الفاتورة كبيرة جدًا.' },
               413,
@@ -1107,6 +971,20 @@ export default {
             { Allow: 'GET, OPTIONS' }
           );
         }
+        if (!/^rcp-[a-f0-9]{16}$/.test(receiptId)) {
+          return jsonResponse(
+            { ok: false, error: 'معرّف الفاتورة غير صالح.' },
+            400,
+            corsHeaders
+          );
+        }
+        if (rSession.subjectType === 'admin' && rSession.adminRole === 'support') {
+          return jsonResponse(
+            { ok: false, error: 'صلاحية الدعم الفني لا تسمح بعرض الفواتير المالية.' },
+            403,
+            corsHeaders
+          );
+        }
         const rRow = await env.DB
           .prepare('SELECT account_id, mime, data_base64 FROM receipts WHERE id = ?')
           .bind(receiptId)
@@ -1138,11 +1016,15 @@ export default {
           },
         });
       }
+
       // Authenticated Player Game Routes (/api/game/*)
       if (
         path === '/api/game/state' ||
+        path === '/api/game/payment-orders' ||
         path === '/api/game/migrate-local' ||
-        path === '/api/game/reset'
+        path === '/api/game/reset' ||
+        path === '/api/game/coop-quests' ||
+        path === '/api/game/coop-quests/claim'
       ) {
         const token = extractBearerToken(request);
         const session = token
@@ -1152,17 +1034,6 @@ export default {
           return jsonResponse(
             { ok: false, error: 'جلسة الدخول غير صالحة أو منتهية.' },
             401,
-            corsHeaders
-          );
-        }
-                if (emailVerificationEnabled(env) && session.player.email && session.player.email_verified !== 1) {
-          return jsonResponse(
-            {
-              ok: false,
-              code: 'EMAIL_NOT_VERIFIED',
-              error: 'يجب تأكيد البريد الإلكتروني أولًا قبل الوصول إلى بيانات اللعبة.',
-            },
-            403,
             corsHeaders
           );
         }
@@ -1265,6 +1136,69 @@ export default {
           );
         }
 
+        if (path === '/api/game/payment-orders') {
+          if (request.method !== 'POST') {
+            return jsonResponse(
+              { ok: false, error: 'Method Not Allowed' },
+              405,
+              corsHeaders,
+              { Allow: 'POST, OPTIONS' }
+            );
+          }
+          const body = await readJsonBody(request);
+          const productType = body?.productType;
+          const paymentMethod = body?.paymentMethod;
+          const productId = typeof body?.productId === 'string' ? body.productId.trim() : '';
+
+          if (
+            (productType !== 'gem_package' &&
+              productType !== 'hakim_sub' &&
+              productType !== 'vip_sub' &&
+              productType !== 'registration_fee') ||
+            (paymentMethod !== 'apple_pay' &&
+              paymentMethod !== 'mada' &&
+              paymentMethod !== 'bank_transfer' &&
+              paymentMethod !== 'binance') ||
+            !productId
+          ) {
+            return jsonResponse(
+              { ok: false, error: 'بيانات طلب الدفع غير صالحة أو غير مكتملة.' },
+              400,
+              corsHeaders
+            );
+          }
+
+          const orderRes = await submitPlayerPaymentOrderSafely(env.DB, {
+            accountId: session.accountId,
+            productType,
+            productId,
+            paymentMethod,
+            transferRef: typeof body?.transferRef === 'string' ? body.transferRef : undefined,
+            receiptName: typeof body?.receiptName === 'string' ? body.receiptName : undefined,
+            receiptId: typeof body?.receiptId === 'string' ? body.receiptId : undefined,
+            now,
+          });
+          if (!orderRes.ok) {
+            return jsonResponse(
+              { ok: false, error: orderRes.error },
+              orderRes.status,
+              corsHeaders
+            );
+          }
+          return jsonResponse(
+            {
+              ok: true,
+              order: orderRes.order,
+              revision: orderRes.revision,
+              state: orderRes.state,
+              adminConfig: orderRes.adminConfig,
+              serverTimeUtc: now,
+            },
+            201,
+            corsHeaders
+          );
+        }
+
         if (path === '/api/game/migrate-local') {
           if (request.method !== 'POST') {
             return jsonResponse(
@@ -1348,6 +1282,84 @@ export default {
             corsHeaders
           );
         }
+
+        if (path === '/api/game/coop-quests') {
+          if (request.method !== 'GET') {
+            return jsonResponse(
+              { ok: false, error: 'Method Not Allowed' },
+              405,
+              corsHeaders,
+              { Allow: 'GET, OPTIONS' }
+            );
+          }
+          const res = await getPlayerCoopQuestsStatus(env.DB, session.accountId, now);
+          if (!res.ok) {
+            return jsonResponse(
+              { ok: false, error: res.error },
+              res.status,
+              corsHeaders
+            );
+          }
+          return jsonResponse(
+            {
+              ok: true,
+              serverId: res.serverId,
+              serverName: res.serverName,
+              serverPlayersCount: res.serverPlayersCount,
+              eligibleForCoop: res.eligibleForCoop,
+              mainLevel: res.mainLevel,
+              allianceCenterLevel: res.allianceCenterLevel,
+              quests: res.quests,
+              serverTimeUtc: now,
+            },
+            200,
+            corsHeaders
+          );
+        }
+
+        if (path === '/api/game/coop-quests/claim') {
+          if (request.method !== 'POST') {
+            return jsonResponse(
+              { ok: false, error: 'Method Not Allowed' },
+              405,
+              corsHeaders,
+              { Allow: 'POST, OPTIONS' }
+            );
+          }
+          const body = await readJsonBody(request);
+          const questId = typeof body?.questId === 'string' ? body.questId.trim() : '';
+          if (!questId) {
+            return jsonResponse(
+              { ok: false, error: 'معرّف المهمة المشتركة مطلوب.' },
+              400,
+              corsHeaders
+            );
+          }
+          const res = await claimPlayerCoopQuest(env.DB, {
+            accountId: session.accountId,
+            questId,
+            now,
+          });
+          if (!res.ok) {
+            return jsonResponse(
+              { ok: false, error: res.error },
+              res.status,
+              corsHeaders
+            );
+          }
+          return jsonResponse(
+            {
+              ok: true,
+              questId: res.questId,
+              state: res.state,
+              revision: res.revision,
+              quests: res.quests,
+              serverTimeUtc: now,
+            },
+            200,
+            corsHeaders
+          );
+        }
       }
 
       // Admin Authentication & Operations (/api/admin/*)
@@ -1360,33 +1372,31 @@ export default {
             { Allow: 'POST, OPTIONS' }
           );
         }
-        const configuredPassword = env.ADMIN_PASSWORD?.trim();
-        if (!configuredPassword) {
-          return jsonResponse(
-            {
-              ok: false,
-              error: 'كلمة مرور الإدارة غير مهيأة على الخادم (مطلوب إضافة ADMIN_PASSWORD في Cloudflare Secrets).',
-            },
-            503,
-            corsHeaders
-          );
-        }
         const body = await readJsonBody(request);
         const inputPassword =
           typeof body?.password === 'string' ? body.password : '';
-        const role =
+        const role: AdminRoleType =
           body?.role === 'partner' || body?.role === 'support'
             ? body.role
             : 'founder';
 
-        const valid = await constantTimeEqualText(
-          inputPassword,
-          configuredPassword
-        );
-        if (!valid) {
+        if (!inputPassword) {
           return jsonResponse(
-            { ok: false, error: 'كلمة مرور الإدارة غير صحيحة.' },
-            401,
+            { ok: false, error: 'يرجى إدخال كلمة المرور الخاصة بهذه الصلاحية.' },
+            400,
+            corsHeaders
+          );
+        }
+
+        const check = await verifyAdminRolePassword(env.DB, {
+          role,
+          password: inputPassword,
+          envSecrets: env,
+        });
+        if (!check.ok) {
+          return jsonResponse(
+            { ok: false, error: check.error },
+            check.status,
             corsHeaders
           );
         }
@@ -1426,7 +1436,15 @@ export default {
         return jsonResponse({ ok: true }, 200, corsHeaders);
       }
 
-      if (path === '/api/admin/overview' || path === '/api/admin/config' || path.startsWith('/api/admin/players/')) {
+      if (
+        path === '/api/admin/overview' ||
+        path === '/api/admin/config' ||
+        path === '/api/admin/credentials' ||
+        path === '/api/admin/backups' ||
+        path === '/api/admin/backups/restore' ||
+        path.startsWith('/api/admin/backups/') ||
+        path.startsWith('/api/admin/players/')
+      ) {
         const token = extractBearerToken(request);
         const session = token
           ? await resolveSessionByToken(env.DB, token, now)
@@ -1438,6 +1456,7 @@ export default {
             corsHeaders
           );
         }
+        const role = session.adminRole ?? 'founder';
 
         if (path === '/api/admin/overview') {
           if (request.method !== 'GET') {
@@ -1448,13 +1467,16 @@ export default {
               { Allow: 'GET, OPTIONS' }
             );
           }
-          const data = await listPlayersForAdmin(env.DB, now);
+          const data = await listPlayersForAdmin(env.DB, now, role);
+          const backups =
+            role === 'founder' ? await listAdminBackups(env.DB) : undefined;
           return jsonResponse(
             {
               ok: true,
-              role: session.adminRole ?? 'founder',
+              role,
               adminConfig: data.adminConfig,
               players: data.players,
+              ...(backups ? { backups } : {}),
               serverTimeUtc: now,
             },
             200,
@@ -1471,7 +1493,7 @@ export default {
               { Allow: 'PUT, OPTIONS' }
             );
           }
-          if ((session.adminRole ?? 'founder') !== 'founder') {
+          if (role !== 'founder') {
             return jsonResponse(
               { ok: false, error: 'تعديل الإعدادات العامة حصري للمؤسس.' },
               403,
@@ -1503,8 +1525,164 @@ export default {
           );
         }
 
-     const pwMatch = path.match(/^\/api\/admin\/players\/([^/]+)\/password$/);
-        if (pwMatch) {
+        if (path === '/api/admin/credentials') {
+          if (role !== 'founder') {
+            return jsonResponse(
+              { ok: false, error: 'إدارة كلمات مرور الصلاحيات حصرية للمؤسس (Founder) فقط.' },
+              403,
+              corsHeaders
+            );
+          }
+          if (request.method === 'GET') {
+            const credentials = await getAdminCredentialsStatus(env.DB, env);
+            return jsonResponse(
+              { ok: true, credentials, serverTimeUtc: now },
+              200,
+              corsHeaders
+            );
+          }
+          if (request.method === 'POST') {
+            const body = await readJsonBody(request);
+            const targetRole =
+              body?.role === 'founder' ||
+              body?.role === 'partner' ||
+              body?.role === 'support'
+                ? body.role
+                : null;
+            if (!targetRole) {
+              return jsonResponse(
+                { ok: false, error: 'يرجى تحديد الصلاحية المطلوبة (founder / partner / support).' },
+                400,
+                corsHeaders
+              );
+            }
+            const resetToEnv = Boolean(body?.resetToEnv);
+            const newPassword =
+              typeof body?.newPassword === 'string' ? body.newPassword : undefined;
+            const res = await setAdminRoleCredential(env.DB, {
+              targetRole,
+              newPassword,
+              resetToEnv,
+              currentTokenHash: session.tokenHash,
+              envSecrets: env,
+              now,
+            });
+            if (!res.ok) {
+              return jsonResponse(
+                { ok: false, error: res.error },
+                res.status,
+                corsHeaders
+              );
+            }
+            return jsonResponse(
+              { ok: true, credentials: res.credentials, serverTimeUtc: now },
+              200,
+              corsHeaders
+            );
+          }
+          return jsonResponse(
+            { ok: false, error: 'Method Not Allowed' },
+            405,
+            corsHeaders,
+            { Allow: 'GET, POST, OPTIONS' }
+          );
+        }
+
+        if (path === '/api/admin/backups') {
+          if (role !== 'founder') {
+            return jsonResponse(
+              { ok: false, error: 'النسخ الاحتياطي حصري للمؤسس (Founder) فقط.' },
+              403,
+              corsHeaders
+            );
+          }
+          if (request.method === 'GET') {
+            const backups = await listAdminBackups(env.DB);
+            return jsonResponse(
+              { ok: true, backups, serverTimeUtc: now },
+              200,
+              corsHeaders
+            );
+          }
+          if (request.method === 'POST') {
+            const body = await readJsonBody(request);
+            const label = typeof body?.label === 'string' ? body.label : '';
+            const createdBy =
+              typeof body?.createdBy === 'string' && body.createdBy.trim()
+                ? body.createdBy.trim()
+                : 'المؤسس (Founder)';
+            const payloadJson =
+              typeof body?.payloadJson === 'string' ? body.payloadJson : '';
+
+            if (!payloadJson) {
+              const serverId =
+                typeof body?.serverId === 'string' && body.serverId.trim()
+                  ? body.serverId.trim()
+                  : 'ALL';
+              const created = await createServerBackup(env.DB, {
+                serverId,
+                label,
+                createdBy,
+                now,
+              });
+              if (!created.ok) {
+                return jsonResponse(
+                  { ok: false, error: created.error },
+                  created.status,
+                  corsHeaders
+                );
+              }
+              return jsonResponse(
+                {
+                  ok: true,
+                  snapshot: created.snapshot,
+                  backups: created.list,
+                  serverTimeUtc: now,
+                },
+                201,
+                corsHeaders
+              );
+            }
+
+            const commanderName =
+              typeof body?.commanderName === 'string' ? body.commanderName : '';
+            const totalSarApproved = Number(body?.totalSarApproved ?? 0) || 0;
+
+            const created = await createAdminBackup(env.DB, {
+              label,
+              createdBy,
+              totalSarApproved,
+              commanderName,
+              payloadJson,
+              now,
+            });
+            if (!created.ok) {
+              return jsonResponse(
+                { ok: false, error: created.error },
+                created.status,
+                corsHeaders
+              );
+            }
+            return jsonResponse(
+              {
+                ok: true,
+                snapshot: created.snapshot,
+                backups: created.list,
+                serverTimeUtc: now,
+              },
+              201,
+              corsHeaders
+            );
+          }
+          return jsonResponse(
+            { ok: false, error: 'Method Not Allowed' },
+            405,
+            corsHeaders,
+            { Allow: 'GET, POST, OPTIONS' }
+          );
+        }
+
+        if (path === '/api/admin/backups/restore') {
           if (request.method !== 'POST') {
             return jsonResponse(
               { ok: false, error: 'Method Not Allowed' },
@@ -1513,45 +1691,128 @@ export default {
               { Allow: 'POST, OPTIONS' }
             );
           }
-          if ((session.adminRole ?? 'founder') !== 'founder') {
+          if (role !== 'founder') {
             return jsonResponse(
-              { ok: false, error: 'تعيين كلمات المرور حصري للمؤسس.' },
+              { ok: false, error: 'استعادة النسخ الاحتياطية حصرية للمؤسس (Founder) فقط.' },
               403,
               corsHeaders
             );
           }
-          const pwTargetId = decodeURIComponent(pwMatch[1]);
-          const pwBody = await readJsonBody(request);
-          const pwNew = typeof pwBody?.newPassword === 'string' ? pwBody.newPassword : '';
-          const pwCheck2 = validatePassword(pwNew);
-          if (!pwCheck2.valid) {
+          const body = await readJsonBody(request);
+          const backupId =
+            typeof body?.backupId === 'string' ? body.backupId.trim() : undefined;
+          const payloadJson =
+            typeof body?.payloadJson === 'string' ? body.payloadJson : undefined;
+          const restored = await restoreServerBackupSafely(env.DB, {
+            backupId,
+            payloadJson,
+            now,
+          });
+          if (!restored.ok) {
             return jsonResponse(
-              { ok: false, error: pwCheck2.error },
-              400,
+              { ok: false, error: restored.error },
+              restored.status,
               corsHeaders
             );
           }
-          const pwTarget = await findPlayerById(env.DB, pwTargetId);
-          if (!pwTarget) {
-            return jsonResponse(
-              { ok: false, error: 'اللاعب غير موجود.' },
-              404,
-              corsHeaders
-            );
-          }
-          const pwHashed = await hashPassword(pwNew);
-          await env.DB.batch([
-            env.DB.prepare(
-              'UPDATE players SET password_hash = ?, password_salt = ?, updated_at = ? WHERE account_id = ?'
-            ).bind(pwHashed.hashHex, pwHashed.saltHex, now, pwTargetId),
-            env.DB.prepare('DELETE FROM sessions WHERE account_id = ?').bind(pwTargetId),
-          ]);
           return jsonResponse(
-            { ok: true, accountId: pwTargetId, message: 'تم تعيين كلمة المرور الجديدة.' },
+            {
+              ok: true,
+              serverId: restored.serverId,
+              serverName: restored.serverName,
+              restoredPlayersCount: restored.restoredPlayersCount,
+              adminConfig: restored.adminConfig,
+              players: restored.players,
+              serverTimeUtc: now,
+            },
             200,
             corsHeaders
           );
         }
+
+        const backupMatch = path.match(/^\/api\/admin\/backups\/([^/]+)$/);
+        if (backupMatch) {
+          if (request.method !== 'DELETE') {
+            return jsonResponse(
+              { ok: false, error: 'Method Not Allowed' },
+              405,
+              corsHeaders,
+              { Allow: 'DELETE, OPTIONS' }
+            );
+          }
+          if (role !== 'founder') {
+            return jsonResponse(
+              { ok: false, error: 'حذف النسخ الاحتياطية حصري للمؤسس (Founder) فقط.' },
+              403,
+              corsHeaders
+            );
+          }
+          const backupId = decodeURIComponent(backupMatch[1]);
+          const backups = await deleteAdminBackup(env.DB, backupId);
+          return jsonResponse(
+            { ok: true, backups, serverTimeUtc: now },
+            200,
+            corsHeaders
+          );
+        }
+
+        const playerPasswordMatch = path.match(
+          /^\/api\/admin\/players\/([^/]+)\/password$/
+        );
+        if (playerPasswordMatch) {
+          if (request.method !== 'POST') {
+            return jsonResponse(
+              { ok: false, error: 'Method Not Allowed' },
+              405,
+              corsHeaders,
+              { Allow: 'POST, OPTIONS' }
+            );
+          }
+          if (role !== 'founder') {
+            return jsonResponse(
+              { ok: false, error: 'تعديل كلمة مرور اللاعبين يدويًا حصري للمؤسس (Founder) فقط.' },
+              403,
+              corsHeaders
+            );
+          }
+          const targetAccountId = decodeURIComponent(playerPasswordMatch[1]);
+          const body = await readJsonBody(request);
+          const pwCheck = validatePassword(body?.newPassword);
+          if (!pwCheck.valid) {
+            return jsonResponse(
+              { ok: false, error: pwCheck.error },
+              400,
+              corsHeaders
+            );
+          }
+
+          const { hashHex, saltHex } = await hashPassword(String(body?.newPassword));
+          const resetRes = await adminResetPlayerPassword(env.DB, {
+            accountId: targetAccountId,
+            passwordHash: hashHex,
+            passwordSalt: saltHex,
+            actorRole: role,
+            now,
+          });
+          if (!resetRes.ok) {
+            return jsonResponse(
+              { ok: false, error: resetRes.error },
+              resetRes.status,
+              corsHeaders
+            );
+          }
+          return jsonResponse(
+            {
+              ok: true,
+              accountId: targetAccountId,
+              message: 'تم تعديل كلمة مرور اللاعب بنجاح وإلغاء جلساته السابقة.',
+              serverTimeUtc: now,
+            },
+            200,
+            corsHeaders
+          );
+        }
+
         const playerMatch = path.match(/^\/api\/admin\/players\/([^/]+)\/state$/);
         if (playerMatch) {
           if (request.method !== 'POST' && request.method !== 'PUT') {
@@ -1580,6 +1841,7 @@ export default {
           const saved = await adminSavePlayerState(env.DB, {
             accountId: targetAccountId,
             nextState: body.state as JsonObject,
+            role,
             now,
           });
           if (!saved.ok) {

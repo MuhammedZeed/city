@@ -58,3 +58,32 @@ CREATE TABLE IF NOT EXISTS email_codes (
 
 CREATE INDEX IF NOT EXISTS idx_email_codes_lookup ON email_codes(email, purpose, used_at, expires_at);
 CREATE INDEX IF NOT EXISTS idx_email_codes_account ON email_codes(account_id, purpose, created_at);
+
+CREATE TABLE IF NOT EXISTS admin_backups (
+  id TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  total_sar_approved REAL NOT NULL DEFAULT 0,
+  commander_name TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_backups_created ON admin_backups(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS receipts (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  data_base64 TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_receipts_account ON receipts(account_id);
+
+CREATE TABLE IF NOT EXISTS admin_credentials (
+  role TEXT PRIMARY KEY CHECK (role IN ('founder', 'partner', 'support')),
+  password_hash TEXT NOT NULL,
+  password_salt TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
