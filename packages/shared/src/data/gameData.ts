@@ -2,6 +2,7 @@ import {
   AdminConfig,
   BuildingType,
   CityPlotDef,
+  CoopQuestDef,
   GameServerConfig,
   GemPackageConfig,
   MarketOffer,
@@ -260,11 +261,11 @@ export const ALLIANCE_CENTER_UPGRADE_TABLE: readonly {
   requiredHq: number;
   embassySlots: number;
 }[] = [
-  { level: 1, cost: { wheat: 260, wood: 300, iron: 260 }, durationSec: 15 * 60, requiredHq: 3, embassySlots: 2 },
-  { level: 2, cost: { wheat: 500, wood: 560, iron: 480 }, durationSec: 35 * 60, requiredHq: 5, embassySlots: 4 },
-  { level: 3, cost: { wheat: 920, wood: 1020, iron: 880 }, durationSec: 80 * 60, requiredHq: 7, embassySlots: 6 },
-  { level: 4, cost: { wheat: 1600, wood: 1750, iron: 1500 }, durationSec: 150 * 60, requiredHq: 8, embassySlots: 8 },
-  { level: 5, cost: { wheat: 2600, wood: 2800, iron: 2400 }, durationSec: 240 * 60, requiredHq: 10, embassySlots: 12 },
+  { level: 1, cost: { wheat: 620, wood: 720, iron: 640 }, durationSec: 25 * 60, requiredHq: 10, embassySlots: 2 },
+  { level: 2, cost: { wheat: 980, wood: 1100, iron: 960 }, durationSec: 50 * 60, requiredHq: 10, embassySlots: 4 },
+  { level: 3, cost: { wheat: 1450, wood: 1620, iron: 1400 }, durationSec: 95 * 60, requiredHq: 10, embassySlots: 6 },
+  { level: 4, cost: { wheat: 2050, wood: 2250, iron: 1950 }, durationSec: 160 * 60, requiredHq: 10, embassySlots: 8 },
+  { level: 5, cost: { wheat: 2700, wood: 2950, iron: 2550 }, durationSec: 240 * 60, requiredHq: 10, embassySlots: 12 },
 ];
 
 export const SEAPORT_UPGRADE_TABLE: readonly {
@@ -419,12 +420,12 @@ export const BUILDINGS_META: Record<BuildingType, BuildingMeta> = {
   alliance_center: {
     type: 'alliance_center',
     name: 'مركز التحالف',
-    shortDesc: 'مقر دبلوماسي لتأسيس التحالفات (حتى 10 أعضاء) وتنسيق الدعم المشترك.',
+    shortDesc: 'مقر دبلوماسي يُفتح عند المبنى الرئيسي مستوى 10 لتأسيس التحالفات والمشاركة في المهام الجماعية المشتركة.',
     category: 'core',
     maxLevel: 5,
     allowMultiple: false,
     maxInstances: 1,
-    minHqToBuild: 3,
+    minHqToBuild: 10,
   },
   seaport: {
     type: 'seaport',
@@ -888,10 +889,54 @@ export const DEFAULT_GAME_SERVERS: GameServerConfig[] = [
 ];
 
 export const DEFAULT_PAYMENT_METHODS: Record<PaymentMethodId, PaymentMethodConfig> = {
-  apple_pay: { id: 'apple_pay', enabled: true, discountPct: 0 },
-  mada: { id: 'mada', enabled: true, discountPct: 0 },
-  bank_transfer: { id: 'bank_transfer', enabled: true, discountPct: 0 },
-  binance: { id: 'binance', enabled: true, discountPct: 0 },
+  apple_pay: {
+    id: 'apple_pay',
+    enabled: true,
+    discountPct: 0,
+    note: '',
+    bankOrNetwork: '',
+    accountTitle: '',
+    accountNumber: '',
+    ibanOrAddress: '',
+    paymentLink: '',
+    instructions: '',
+  },
+  mada: {
+    id: 'mada',
+    enabled: true,
+    discountPct: 0,
+    note: '',
+    bankOrNetwork: '',
+    accountTitle: '',
+    accountNumber: '',
+    ibanOrAddress: '',
+    paymentLink: '',
+    instructions: '',
+  },
+  bank_transfer: {
+    id: 'bank_transfer',
+    enabled: true,
+    discountPct: 0,
+    note: '',
+    bankOrNetwork: '',
+    accountTitle: '',
+    accountNumber: '',
+    ibanOrAddress: '',
+    paymentLink: '',
+    instructions: '',
+  },
+  binance: {
+    id: 'binance',
+    enabled: true,
+    discountPct: 0,
+    note: '',
+    bankOrNetwork: '',
+    accountTitle: '',
+    accountNumber: '',
+    ibanOrAddress: '',
+    paymentLink: '',
+    instructions: '',
+  },
 };
 
 export const MARKET_RESOURCES_META: Record<
@@ -1273,6 +1318,117 @@ export const QUESTS_CATALOG: QuestDef[] = [
       iron: 420,
       achievementPoints: 75,
       speedUp: { tier: '30m', count: 1 },
+    },
+  },
+];
+
+export const COOP_QUESTS_CATALOG: CoopQuestDef[] = [
+  {
+    id: 'coop_builds_30',
+    title: 'حملة الإعمار الجماعية',
+    description:
+      'يتعاون جميع لاعبي السيرفر لإنجاز 30 ترقية مبنى إضافية إجمالاً (تُحتسب المستويات المطوّرة فوق مستوى البداية).',
+    metricKey: 'total_building_upgrades',
+    unitLabel: 'ترقية مبنى',
+    targetValue: 30,
+    minHqRequired: 10,
+    requiresAllianceCenter: true,
+    rewards: {
+      wheat: 1500,
+      wood: 1500,
+      iron: 1200,
+      achievementPoints: 120,
+      speedUp: { tier: '30m', count: 2 },
+    },
+  },
+  {
+    id: 'coop_hq10_3',
+    title: 'قادة النخبة — المستوى 10',
+    description:
+      'وصول 3 قادة على الأقل في نفس السيرفر إلى المبنى الرئيسي مستوى 10 لفتح عصر التحالفات الكبرى.',
+    metricKey: 'hq10_players',
+    unitLabel: 'قائد (HQ 10)',
+    targetValue: 3,
+    minHqRequired: 10,
+    requiresAllianceCenter: true,
+    rewards: {
+      wheat: 3200,
+      wood: 3200,
+      iron: 2800,
+      achievementPoints: 250,
+      speedUp: { tier: '1h', count: 1 },
+    },
+  },
+  {
+    id: 'coop_alliance_10',
+    title: 'الركيزة الدبلوماسية للسيرفر',
+    description:
+      'رفع مجموع مستويات مباني «مركز التحالف» لدى جميع لاعبي السيرفر إلى 10 مستويات مشتركة.',
+    metricKey: 'alliance_center_levels',
+    unitLabel: 'مستوى مركز تحالف',
+    targetValue: 10,
+    minHqRequired: 10,
+    requiresAllianceCenter: true,
+    rewards: {
+      wheat: 2800,
+      wood: 2800,
+      iron: 2400,
+      achievementPoints: 220,
+      speedUp: { tier: '1h', count: 1 },
+    },
+  },
+  {
+    id: 'coop_research_20',
+    title: 'مبادرة التفوق التقني',
+    description:
+      'إتمام 20 مستوى بحث علمي بشكل تراكمي بين جميع لاعبي السيرفر في مراكز الأبحاث.',
+    metricKey: 'total_research_levels',
+    unitLabel: 'مستوى بحث',
+    targetValue: 20,
+    minHqRequired: 10,
+    requiresAllianceCenter: true,
+    rewards: {
+      wheat: 2200,
+      wood: 2200,
+      iron: 2600,
+      achievementPoints: 180,
+      speedUp: { tier: '30m', count: 2 },
+    },
+  },
+  {
+    id: 'coop_army_500',
+    title: 'الجاهزية العسكرية المشتركة',
+    description:
+      'حشد وتدريب 500 وحدة عسكرية واستطلاعية في مجموع حاميات لاعبي السيرفر.',
+    metricKey: 'total_army_units',
+    unitLabel: 'وحدة عسكرية',
+    targetValue: 500,
+    minHqRequired: 10,
+    requiresAllianceCenter: true,
+    rewards: {
+      wheat: 2400,
+      wood: 2000,
+      iron: 3000,
+      achievementPoints: 200,
+      speedUp: { tier: '1h', count: 1 },
+    },
+  },
+  {
+    id: 'coop_energy_1500',
+    title: 'تحالف الطاقة البحرية',
+    description:
+      'تكوين مخزون مشترك قدره 1,500 وحدة من النفط الخام والغاز الطبيعي لدى لاعبي السيرفر.',
+    metricKey: 'maritime_energy_stock',
+    unitLabel: 'برميل/وحدة طاقة',
+    targetValue: 1500,
+    minHqRequired: 10,
+    requiresAllianceCenter: true,
+    rewards: {
+      wheat: 3600,
+      wood: 3400,
+      iron: 3400,
+      achievementPoints: 350,
+      speedUp: { tier: '24h', count: 1 },
     },
   },
 ];

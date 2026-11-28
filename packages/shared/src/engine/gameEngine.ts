@@ -299,6 +299,7 @@ export function createInitialState(commanderName = 'القائد سيف'): GameS
     marches: [],
     speedUpCards: { ...DEFAULT_SPEEDUP_CARDS },
     questClaims: {},
+    coopQuestClaims: {},
     dailyResetKey: getKsaDayKey(now),
     weeklyResetKey: getKsaWeekKey(now),
     reports: [
@@ -448,6 +449,15 @@ export function hydrateLoadedState(
             : o;
         });
 
+    const hydratedHakim = {
+      ...base.hakimSubscription,
+      ...(parsed.hakimSubscription ?? {}),
+    };
+    const hasActivePaidHakim =
+      Boolean(hydratedHakim.active) &&
+      typeof hydratedHakim.expiresAt === 'number' &&
+      hydratedHakim.expiresAt > now;
+
     const hydrated: GameState = {
       ...base,
       ...parsed,
@@ -466,9 +476,12 @@ export function hydrateLoadedState(
         ...(parsed.combatBuffs ?? {}),
       },
       hakimSubscription: {
-        ...base.hakimSubscription,
-        ...(parsed.hakimSubscription ?? {}),
+        ...hydratedHakim,
+        active: hasActivePaidHakim,
+        expiresAt: hasActivePaidHakim ? hydratedHakim.expiresAt : null,
       },
+      smartBotActive: hasActivePaidHakim ? Boolean(parsed.smartBotActive) : false,
+      smartBotExpiresAt: hasActivePaidHakim ? hydratedHakim.expiresAt : null,
       vipSubscription: {
         ...base.vipSubscription,
         ...(parsed.vipSubscription ?? {}),
@@ -482,6 +495,7 @@ export function hydrateLoadedState(
         ...(parsed.units ?? {}),
       },
       speedUpCards: migratedCards,
+      coopQuestClaims: { ...(parsed.coopQuestClaims ?? {}) },
       botConfig: {
         ...DEFAULT_BOT_CONFIG,
         ...(parsed.botConfig ?? {}),
@@ -1209,14 +1223,22 @@ export function advanceGameState(
     state.combatBuffs.defenseBoostEndsAt = null;
   }
 
-  // Handle Smart Bot Hakim expiration (NO auto-renewal per GDD §41)
-  if (state.smartBotActive && state.smartBotExpiresAt && now >= state.smartBotExpiresAt) {
+  // Handle Smart Bot Hakim subscription enforcement & expiration (NO free activation, NO auto-renewal)
+  const hasPaidHakim =
+    Boolean(state.hakimSubscription?.active) &&
+    typeof state.hakimSubscription?.expiresAt === 'number' &&
+    state.hakimSubscription.expiresAt > now;
+  if (!hasPaidHakim) {
     state.smartBotActive = false;
     state.smartBotExpiresAt = null;
-    state.hakimSubscription = {
-      ...state.hakimSubscription,
-      active: false,
-    };
+    if (state.hakimSubscription?.active) {
+      state.hakimSubscription = {
+        ...state.hakimSubscription,
+        active: false,
+      };
+    }
+  } else {
+    state.smartBotExpiresAt = state.hakimSubscription.expiresAt;
   }
   if (
     state.vipSubscription.active &&
@@ -1573,15 +1595,15 @@ export function advanceGameState(
           wood: Math.round(115 * mult),
           iron: Math.round(105 * mult),
         };
-        const tradeGain = Math.round(25 * seaportLv * exp.vesselCount * maritimeTechMult);
+        const achievementGain = Math.round(15 * seaportLv * exp.vesselCount * maritimeTechMult);
         state.resources = addResources(state.resources, bundle);
-        state.ledger.tradeBalance += tradeGain;
-        completedEvents.push(`عادت سفن التجارة البحرية (+${tradeGain} نقاط تجارة)`);
+        state.ledger.achievementPoints += achievementGain;
+        completedEvents.push(`عادت سفن التجارة البحرية (+${achievementGain} نقطة إنجاز وموارد)`);
         state.reports.unshift({
           id: `rep-sea-${exp.id}`,
           category: 'maritime',
           title: `وصول قافلة التجارة البحرية (${exp.vesselCount} سفينة)`,
-          summary: `حققت الرحلة البحرية عوائد إمداد وتجارة (+${tradeGain} نقطة في سجل التجارة).`,
+          summary: `حققت الرحلة البحرية عوائد إمداد وموارد (+${achievementGain} نقطة إنجاز، دون احتسابها في رصيد التجارة).`,
           details: [
             `الشحنة الموردة: ${bundle.wheat} قمح · ${bundle.wood} خشب · ${bundle.iron} حديد`,
             'تم إضافة العوائد إلى رصيد المدينة دون إيقاف الإنتاج عند تجاوز السعة المحمية.',
@@ -2805,9 +2827,13 @@ export function calculateMarketDealMetrics(
   const netSellerGems = Number((grossGems - commissionGems).toFixed(2));
 
   // Anti-inflation rule: eligible value = min(actual gross sale, reference value for quantity sold)
+  // Oil & gas gathered from offshore oil ships never count toward trade points
+  const isOffshoreEnergy = resource === 'crude_oil' || resource === 'natural_gas';
   const eligibleGrossGems = Math.min(grossGems, referenceValueGems);
   const eligibleNetRaw = eligibleGrossGems * (1 - feePct / 100);
-  const tradePointsEarned = Number((eligibleNetRaw * (factorPer100 / 100)).toFixed(2));
+  const tradePointsEarned = isOffshoreEnergy
+    ? 0
+    : Number((eligibleNetRaw * (factorPer100 / 100)).toFixed(2));
 
   return {
     grossGems,
@@ -3537,8 +3563,8 @@ export function createAlliance(
 ): { state: GameState; error?: string } {
   const mainLv = getMainBuildingLevel(state);
   const acLv = getAllianceCenterLevel(state);
-  if (mainLv < 3 || acLv < 1) {
-    return { state, error: 'تأسيس التحالف يتطلب المبنى الرئيسي مستوى 3 ومركز التحالف.' };
+  if (mainLv < 10 || acLv < 1) {
+    return { state, error: 'تأسيس التحالف يتطلب المبنى الرئيسي مستوى 10 ومركز التحالف.' };
   }
   if (state.allianceMeta.currentAlliance) {
     return { state, error: 'أنت منضم بالفعل إلى تحالف نشط.' };

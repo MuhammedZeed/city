@@ -72,6 +72,12 @@ export interface PaymentMethodConfig {
   enabled: boolean;
   discountPct: number;
   note?: string;
+  bankOrNetwork?: string;
+  accountTitle?: string;
+  accountNumber?: string;
+  ibanOrAddress?: string;
+  paymentLink?: string;
+  instructions?: string;
 }
 
 export interface GameServerConfig {
@@ -133,7 +139,54 @@ export interface AdminBackupSnapshot {
   createdBy: string;
   totalSarApproved: number;
   commanderName: string;
+  backupType?: 'server_snapshot_v1' | 'legacy_player_snapshot';
+  serverId?: string;
+  serverName?: string;
+  playersCount?: number;
   payloadJson: string;
+}
+
+export type CoopQuestMetricKey =
+  | 'total_building_upgrades'
+  | 'hq10_players'
+  | 'alliance_center_levels'
+  | 'total_research_levels'
+  | 'total_army_units'
+  | 'maritime_energy_stock';
+
+export interface CoopQuestDef {
+  id: string;
+  title: string;
+  description: string;
+  metricKey: CoopQuestMetricKey;
+  unitLabel: string;
+  targetValue: number;
+  minHqRequired: number;
+  requiresAllianceCenter: boolean;
+  rewards: {
+    wheat: number;
+    wood: number;
+    iron: number;
+    achievementPoints: number;
+    speedUp?: { tier: SpeedUpTierId; count: number };
+  };
+}
+
+export interface CoopQuestLiveStatus {
+  quest: CoopQuestDef;
+  currentValue: number;
+  targetValue: number;
+  progressPct: number;
+  completed: boolean;
+  claimed: boolean;
+  canClaim: boolean;
+  contributorsCount: number;
+}
+
+export interface AdminRoleCredentialStatus {
+  role: AdminRole;
+  source: 'database' | 'env_secret' | 'unconfigured';
+  updatedAt: number | null;
 }
 
 export interface ResourceBundle {
@@ -586,6 +639,7 @@ export interface GameState {
   marches: MarchItem[];
   speedUpCards: Record<SpeedUpTierId, number>;
   questClaims: Record<string, boolean>;
+  coopQuestClaims?: Record<string, boolean>;
   dailyResetKey: string;
   weeklyResetKey: string;
   reports: GameReport[];
